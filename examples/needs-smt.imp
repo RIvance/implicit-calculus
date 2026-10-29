@@ -1,0 +1,18 @@
+trait ToString[A] = { toString: A -> String }
+trait Repr[A, B] = { repr: A -> B }
+type Person = { name: String }
+
+impl string: ToString[String] {
+  toString = (text: String) => text
+}
+
+impl personName: Repr[Person, String] {
+  repr = (person: Person) => person.name
+}
+
+impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] {
+  toString = (x: A) => ToString[B].toString(Repr[A, B].repr(x))
+}
+
+// Expected failure with NaiveSynthesizer: discovering the intermediate type needs more than exact lookup.
+ToString[Person].toString({ name = "Ada" })

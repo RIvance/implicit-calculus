@@ -1,0 +1,8 @@
+trait ToString[A] = { toString: A -> String }
+
+def display[A where ToString[A]](x: A): String = x.toString
+
+val ordinary = { toString = (text: String) => "explicit: " ++ text }
+
+// No implementation is installed here; explicitly pass an ordinary value instead.
+display[String]{ordinary}("Ada")

@@ -1,0 +1,599 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern,microtype}
+\usepackage{amsmath,amssymb,mathtools,mathpartir}
+\usepackage[margin=21mm,headheight=14pt]{geometry}
+\usepackage{booktabs,listings,fancyhdr,xcolor}
+\usepackage[hidelinks]{hyperref}
+\definecolor{ink}{HTML}{263849}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small A Minimal Calculus of Implicit Implementations}
+\fancyhead[R]{\small Formal specification}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,keepspaces=true,
+  frame=single,framerule=0.2pt,breaklines=true,showstringspaces=false}
+\newcommand{\Int}{\mathsf{Int}}
+\newcommand{\Str}{\mathsf{String}}
+\newcommand{\Bool}{\mathsf{Bool}}
+\newcommand{\TS}{\mathsf{ToString}}
+\newcommand{\wf}[1]{\Gamma\vdash #1\;\mathsf{type}}
+\newcommand{\E}[3]{\Gamma;\Delta\vdash #1:#2\rightsquigarrow #3}
+\newcommand{\R}[2]{\Gamma;\Delta\vdash #1\Longrightarrow #2}
+\newcommand{\Pj}[2]{\Gamma;\Delta\vdash_{\mathrm{ev}} #1:#2}
+\newcommand{\need}[1]{\mathsf{need}[#1]}
+\newcommand{\hole}[1]{?_{#1}}
+\newcommand{\ilam}[3]{\lambda\{#1:#2\}.\,#3}
+\newcommand{\lam}[3]{\lambda(#1:#2).\,#3}
+\newcommand{\letin}[3]{\mathsf{let}\;#1=#2\;\mathsf{in}\;#3}
+\newcommand{\impl}[4]{\mathsf{impl}\;#1:#2=#3\;\mathsf{in}\;#4}
+\newcommand{\argop}[1]{\operatorname{arg}(#1)}
+\newcommand{\resop}[1]{\operatorname{res}(#1)}
+\newcommand{\erase}[1]{\lvert #1\rvert}
+\newcommand{\eval}[3]{#1\vdash #2\Downarrow #3}
+\newcommand{\kw}[1]{\mathsf{#1}}
+\newcommand{\fields}[1]{\{#1\}}
+\begin{document}
+{\Large\bfseries\color{ink} A Minimal Calculus of Implicit Implementations}\par
+{\small Scala 3 reference model \hfill 28 October 2026}
+
+\section{Types, expressions, and contexts}
+\[
+\begin{array}{rcl}
+A,B,P,Q&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid A\to B\mid A\Rightarrow B
+ \mid\forall\alpha.A\mid\{\ell_j:A_j\}_{j\in J}\\[2pt]
+\Gamma&::=&\cdot\mid\Gamma,\alpha\mid\Gamma,x:A\\
+\Delta&::=&[\,]\mid(d:A)::\Delta
+\end{array}
+\]
+$\Gamma$ binds type variables and ordinary values; $\Delta$ binds available implementation
+values, nearest first. $P,Q$ are ordinary types, not a distinct predicate sort.
+Record labels are distinct and canonically ordered. Equality is structural, modulo
+$\alpha$-equivalence and lexical type-synonym expansion. There is no subtyping.
+
+\textbf{First expression AST} (after type-name expansion):
+\[
+\begin{array}{rcl}
+e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}
+ \mid e(e)\mid e\{e\}\\
+&&\mid\Lambda\alpha.e\mid e[A]\mid\letin{x}{e}{e}\mid\impl{d}{A}{e}{e}\\
+&&\mid\{\ell_j=e_j\}_{j\in J}\mid e.\ell\mid(e:A)\mid\need A
+ \mid e_1\mathbin{\odot}e_2
+\end{array}
+\]
+The actual named AST additionally has $\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ e$.
+Both $x$ and $d$ are parsed as names; lexical name resolution distinguishes their binders.
+In rules, bound names are globally fresh by $\alpha$-renaming. This convention preserves
+ordinary source shadowing without conflating the two environments.
+
+\textbf{Unresolved core}:
+\[
+\begin{array}{rcl}
+c&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{c}\mid\ilam{d}{A}{c}
+ \mid c\,c\mid c\{c\}\\
+&&\mid\Lambda\alpha.c\mid c[A]\mid\letin{x:A}{c}{c}\mid\impl{d}{A}{c}{c}\\
+&&\mid\{\ell_j=c_j\}_{j\in J}\mid c.\ell\mid\hole A
+ \mid c_1\mathbin{\odot}c_2
+\end{array}
+\]
+The core has no aliases, traits, definitions, modules, or method-resolution operation.
+$\hole A$ is a deferred request, not a runtime term.
+
+\textbf{Primitive binary operators}:
+\[
+\begin{array}{c|c|c}
+\odot & \argop\odot & \resop\odot\\\hline
++,-,\times & \Int & \Int\\
+\mathsf{==},<,> & \Int & \Bool\\
+\mathbin{+\!+} & \Str & \Str
+\end{array}
+\]
+\[
+\begin{aligned}
+\delta_+(m,n)&=m+n, &\delta_-(m,n)&=m-n, &\delta_\times(m,n)&=mn,\\
+\delta_{==}(m,n)&=(m=n),&\delta_<(m,n)&=(m<n),&\delta_>(m,n)&=(m>n),\\
+\delta_{++}(s,t)&=st.&&&&
+\end{aligned}
+\]
+Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
+
+\textbf{Type formation} (contexts are assumed well formed):
+\begin{mathpar}
+
+\inferrule*[right=W-Var]{\alpha\in\Gamma}{\wf\alpha}
+
+\inferrule*[right=W-Base]{B\in\{\Int,\Bool,\Str\}}{\wf B}
+
+\inferrule*[right=W-Arrow]{\wf A\\\wf B\\\star\in\{\to,\Rightarrow\}}
+ {\wf{A\star B}}
+
+\inferrule*[right=W-All]{\Gamma,\alpha\vdash A\;\kw{type}\\\alpha\ \kw{fresh}}
+ {\wf{\forall\alpha.A}}
+
+\inferrule*[right=W-Record]{\wf{A_j}\quad(j\in J)\\\ell_j\text{ distinct}}
+ {\wf{\{\ell_j:A_j\}_{j\in J}}}
+\end{mathpar}
+
+\newpage
+\section{Practical syntax and the first AST}
+\begin{lstlisting}
+trait ToString[A] = { toString: A -> String }
+
+impl ToString[String] {
+  toString = (text: String) => text
+}
+
+def display[A where ToString[A]](x: A): String = x.toString
+
+display[String]("Ada")
+\end{lstlisting}
+A declaration sequence is a nested expression, not a module. The parser constructs the
+right-hand sides below directly; $b$ is the remainder of the sequence.
+\[
+\begin{aligned}
+&\kw{trait}\ C[\bar\alpha]=A;\ b
+ &&\equiv\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ b,\\[2pt]
+&\kw{type}\ C[\bar\alpha]=A;\ b
+ &&\equiv\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ b,\\[2pt]
+&\kw{val}\ x=e;\ b
+ &&\equiv\letin{x}{e}{b},\\[2pt]
+&\kw{val}\ x:A=e;\ b
+ &&\equiv\letin{x}{(e:A)}{b},\\[2pt]
+&\kw{impl}\ d:A=e;\ b
+ &&\equiv\impl{d}{A}{e}{b}.
+\end{aligned}
+\]
+For $\bar P=P_1,\ldots,P_k$ and fresh $d_1,\ldots,d_k$:
+\[
+\begin{aligned}
+&\kw{def}\ f[\bar\alpha\ \kw{where}\ \bar P](\bar x:\bar A):B=e;\ b\\
+&\quad\equiv
+ \letin{f}{\Lambda\bar\alpha.\,
+ \lambda\{d_1:P_1\}.\cdots\lambda\{d_k:P_k\}.
+ \lambda(\bar x:\bar A).(e:B)}{b}.
+\end{aligned}
+\]
+\[
+\begin{aligned}
+&\kw{impl}\ i[\bar\alpha\ \kw{where}\ \bar P]:Q\ \{\bar\ell=\bar e\};\ b\\
+&\quad\equiv\impl{i}{\forall\bar\alpha.P_1\Rightarrow\cdots\Rightarrow P_k\Rightarrow Q}
+ {\Lambda\bar\alpha.\lambda\{d_1:P_1\}.\cdots\lambda\{d_k:P_k\}.
+ \{\bar\ell=\bar e\}}{b}.
+\end{aligned}
+\]
+An implementation body after \texttt{=} may be any expression. A record body without
+\texttt{=} is the same expression. Anonymous \texttt{impl Q \{...\}} introduces a fresh,
+unspellable binding name. Ordinary parameter lists are curried. The parser uses precedence
+$\mathsf{postfix}>\times>\{+,-\}>\mathbin{+\!+}>\{==,<,>\}$, with
+left-associative binary operators.
+
+\subsection*{Lexical type aliases and qualified references}
+A nonrecursive synonym $C[\bar\alpha]=B$ expands
+$C[\bar A]$ to $B[\bar A/\bar\alpha]$ in its lexical body. Expansion is
+capture avoiding: $B$ retains its declaration-time type-variable bindings.
+$|\bar A|=|\bar\alpha|$ is required. A term binding shadows an equally named synonym.
+If a name resolves to a synonym rather than a term binding:
+\[
+ C[\bar A]\text{ in term position}\quad\equiv\quad\need{C[\bar A]}.
+\]
+Thus \texttt{ToString[A].toString(x)} denotes a projection from a deferred
+implementation request. The core type is directly
+\[
+\TS[A]\triangleq\{\kw{toString}:A\to\Str\}.
+\]
+\subsection*{Judgments and implementation representation}
+\[
+\boxed{\E e A c}\qquad
+\boxed{\R c t}\qquad
+\boxed{H\vdash t:T}\qquad
+\boxed{\eval\rho t v}
+\]
+These are, respectively, name/type elaboration, evidence resolution, explicit-target
+typing, and evaluation. The implementation uses separate de Bruijn indices for $\Gamma$
+and $\Delta$, and a type-variable depth. The final target has one term-index space.
+
+\newpage
+\section{Typing and elaboration: functions and bindings}
+All annotation types must satisfy $\wf A$. Instance selection does not occur in this judgment.
+\begin{mathpar}
+
+\inferrule*[right=E-Var]{x:A\in\Gamma}{\E x A x}
+
+\inferrule*[right=E-Instance]{d:A\in\Delta}{\E d A d}
+
+
+\inferrule*[right=E-Lambda]{\Gamma,x:A;\Delta\vdash e:B\rightsquigarrow c}
+ {\E{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
+
+
+\inferrule*[right=E-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e:B\rightsquigarrow c}
+ {\E{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
+
+
+\inferrule*[right=E-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e:A\rightsquigarrow c\\
+ \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
+ {\E{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
+
+
+\inferrule*[right=E-Type-App]{\E e {\forall\alpha.A} c\\\wf B}
+ {\E{e[B]}{A[B/\alpha]}{c[B]}}
+
+
+\inferrule*[right=E-Implicit-App]{\E{e_1}{A\Rightarrow B}{c_1}\\\E{e_2}{A}{c_2}}
+ {\E{e_1\{e_2\}}{B}{c_1\{c_2\}}}
+
+
+\inferrule*[right=E-App]{\E{e_1}{T}{c_1}\\c_1:T\triangleright c'_1:A\to B\\\E{e_2}{A}{c_2}}
+ {\E{e_1(e_2)}{B}{c'_1\,c_2}}
+
+
+\inferrule*[right=E-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2:B\rightsquigarrow c_2}
+ {\E{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
+
+
+\inferrule*[right=E-Impl]{\E{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2:B\rightsquigarrow c_2}
+ {\E{\impl{d}{A}{e_1}{e_2}}{B}{\impl{d}{A}{c_1}{c_2}}}
+
+
+\inferrule*[right=E-Ascribe]{\E e A c}{\E{(e:A)}{A}{c}}
+
+\inferrule*[right=E-Need]{\wf A}{\E{\need A}{A}{\hole A}}
+\end{mathpar}
+
+\subsection*{Expose an ordinary application}
+\begin{mathpar}
+
+\inferrule*[right=Expose-Stop]{T\ne(P\Rightarrow Q)\text{ for every }P,Q}
+ {c:T\triangleright c:T}
+
+\inferrule*[right=Expose-Step]{c\{\hole P\}:Q\triangleright c':T}
+ {c:P\Rightarrow Q\triangleright c':T}
+\end{mathpar}
+Only ordinary application invokes this relation. In particular, returning an implicit
+function, referring to it by name, or passing it as an ordinary value does not force it.
+An implementation initializer is elaborated in the old $\Delta$: bindings are nonrecursive.
+
+\newpage
+\section{Typing and elaboration: records, primitives, and method syntax}
+\begin{mathpar}
+
+\inferrule*[right=E-Int]{n\in\mathbb Z}{\E n\Int n}
+
+\inferrule*[right=E-String]{s\text{ a string}}{\E s\Str s}
+
+\inferrule*[right=E-Bool]{b\in\{\mathsf{true},\mathsf{false}\}}{\E b\Bool b}
+
+
+\inferrule*[right=E-Record]{\E{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
+ {\E{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
+
+
+\inferrule*[right=E-Project]{\E e{\{\ell_j:A_j\}_{j\in J}}c\\ k\in J}
+ {\E{e.\ell_k}{A_k}{c.\ell_k}}
+
+
+\inferrule*[right=E-BinOp]{\E{e_1}{\argop\odot}{c_1}\\
+ \E{e_2}{\argop\odot}{c_2}}
+ {\E{e_1\mathbin{\odot}e_2}{\resop\odot}{c_1\mathbin{\odot}c_2}}
+\end{mathpar}
+
+\subsection*{Receiver-style method selection}
+For a receiver type $A$ and label $\ell$, define the finite set of \emph{types}
+\[
+\mathcal M_{\Delta,A,\ell}
+=\bigl\{(P,B)\ \bigm|\ (d:P)\in\Delta,\;
+ P=\{\ell_j:A_j\}_{j\in J},\;
+ \exists k\in J.\;\ell_k=\ell\land A_k=A\to B\bigr\}.
+\]
+Repeated occurrences of the same pair contribute one set member.
+Let $\operatorname{labels}(A)$ be the field labels when $A$ is a record, and $\varnothing$ otherwise.
+\begin{mathpar}
+
+\inferrule*[right=E-Method]{\E e A c\\\ell\notin\operatorname{labels}(A)\\
+ \mathcal M_{\Delta,A,\ell}=\{(P,B)\}}
+ {\E{e.\ell}{B}{(\hole P).\ell\;c}}
+\end{mathpar}
+Zero candidates reject the selection; two distinct candidate types reject it as ambiguous.
+This rule determines the request type, not its implementation. Actual record projection
+has priority. Explicit qualification $\need P.\ell(e)$ avoids this receiver-syntax restriction.
+
+\subsection*{The running qualified function}
+With $\TS[A]=\{\kw{toString}:A\to\Str\}$, the source definition
+\begin{lstlisting}
+def display[A where ToString[A]](x: A): String = x.toString
+\end{lstlisting}
+has type and unresolved body
+\[
+\begin{aligned}
+\kw{display}&:\forall A.\TS[A]\Rightarrow A\to\Str,\\
+c_{\kw{display}}&=\Lambda A.\ilam{d}{\TS[A]}{
+ \lam{x}{A}{(\hole{\TS[A]}).\kw{toString}\;x}}.
+\end{aligned}
+\]
+Under $(d:\TS[A])::\Delta$, evidence resolution may select $d$.
+After successful resolution:
+\[
+ t_{\kw{display}}
+ =\Lambda A.\lam{d}{\TS[A]}{\lam{x}{A}{d.\kw{toString}\;x}},
+ \qquad
+ t_{\kw{display}}:\forall A.\TS[A]\to A\to\Str.
+\]
+A concrete call first becomes
+$c_{\kw{display}}[\Str]\{\hole{\TS[\Str]}\}\;s$.
+The request is solved in the \emph{caller's} lexical environment, while requests in
+an ordinary function body are solved in that body's definition environment.
+
+\newpage
+\section{Admissible evidence and the synthesizer}
+Evidence constructions are a restricted subset of the unresolved core:
+\[
+\boxed{p::=d\mid p[A]\mid p\,p\mid p\{p\}.}
+\]
+The only leaves are references into $\Delta$. New literals, lambdas, projections,
+ordinary references from $\Gamma$, and unresolved requests are not synthesis results.
+They may occur inside a previously checked first-class value installed in $\Delta$.
+
+\begin{mathpar}
+
+\inferrule*[right=P-Instance]{d:A\in\Delta}{\Pj d A}
+
+
+\inferrule*[right=P-Type-App]{\Pj p{\forall\alpha.A}\\\wf B}
+ {\Pj{p[B]}{A[B/\alpha]}}
+
+
+\inferrule*[right=P-App]{\Pj{p_1}{A\to B}\\\Pj{p_2}A}
+ {\Pj{p_1\,p_2}B}
+
+
+\inferrule*[right=P-Implicit-App]{\Pj{p_1}{A\Rightarrow B}\\\Pj{p_2}A}
+ {\Pj{p_1\{p_2\}}B}
+\end{mathpar}
+These rules \emph{check} a proposed construction. They do not prescribe a search strategy.
+A pluggable algorithm supplies a partial judgment
+\[
+\Delta\vdash_{\mathcal S} A\rightsquigarrow p.
+\]
+The resolver rechecks $\Pj p A$ before lowering. The source arrow kind is checked before
+erasure, even if two candidate types would erase to the same ordinary function type.
+
+\subsection*{Exact-lookup placeholder}
+Let $\Delta=[d_0:A_0,\ldots,d_{m-1}:A_{m-1}]$, nearest binding first.
+\begin{mathpar}
+
+\inferrule*[right=S-Exact]{0\le j<m\\A_j=A\\\forall k<j.\ A_k\ne A}
+ {\Delta\vdash_{\mathrm{naive}}A\rightsquigarrow d_j}
+\end{mathpar}
+If no $j$ satisfies the premises, the placeholder fails. It does not instantiate a
+universal type, apply a producer, recurse, or search for a hidden type argument.
+Failure is not an uninhabitability result.
+
+\subsection*{First-class polymorphic implementations}
+A generic implementation may have the ordinary core type
+\[
+ i:\forall A,B.\kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
+ \qquad\kw{Repr}[A,B]=\{\kw{repr}:A\to B\}.
+\]
+Given $r:\kw{Repr}[\kw{Person},\Str]$ and $s:\TS[\Str]$ in $\Delta$, the construction
+\[
+ p=i[\kw{Person}][\Str]\{r\}\{s\}
+\]
+satisfies $\Pj p{\TS[\kw{Person}]}$. It is permitted as the result of a stronger synthesizer,
+but the exact-lookup placeholder does not discover it. The source program can construct
+and install it explicitly:
+\begin{lstlisting}
+impl person: ToString[Person] = via[Person, String]{personName}{string}
+ToString[Person].toString({ name = "Ada" })
+\end{lstlisting}
+There is no special type of implementation values: $i,r,s$ are ordinary values,
+and $\mathsf{impl}$ only changes which context binds them.
+
+\newpage
+\section{Resolution and lowering}
+\textbf{Type erasure} (identity on variables and base types):
+\[
+\begin{aligned}
+\erase{A\to B}&=\erase A\to\erase B,&
+\erase{A\Rightarrow B}&=\erase A\to\erase B,\\
+\erase{\forall\alpha.A}&=\forall\alpha.\erase A,&
+\erase{\{\ell_j:A_j\}_{j\in J}}&=\{\ell_j:\erase{A_j}\}_{j\in J}.
+\end{aligned}
+\]
+For evidence, $\erase d=d$, $\erase{p[A]}=\erase p[\erase A]$, and both evidence
+application forms erase to ordinary application. Ordinary and instance names are
+embedded in one target namespace; freshness prevents capture.
+
+\begin{mathpar}
+
+\inferrule*[right=R-Var]{x:A\in\Gamma}{\R x x}
+
+\inferrule*[right=R-Instance]{d:A\in\Delta}{\R d d}
+
+\inferrule*[right=R-Need]{\Delta\vdash_{\mathcal S}A\rightsquigarrow p\\\Pj p A}
+ {\R{\hole A}{\erase p}}
+
+
+\inferrule*[right=R-Lambda]{\Gamma,x:A;\Delta\vdash c\Longrightarrow t}
+ {\R{\lam{x}{A}{c}}{\lam{x}{\erase A}{t}}}
+
+\inferrule*[right=R-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash c\Longrightarrow t}
+ {\R{\ilam{d}{A}{c}}{\lam{d}{\erase A}{t}}}
+
+
+\inferrule*[right=R-App]{\R{c_1}{t_1}\\\R{c_2}{t_2}}
+ {\R{c_1\,c_2}{t_1\,t_2}}
+
+\inferrule*[right=R-Implicit-App]{\R{c_1}{t_1}\\\R{c_2}{t_2}}
+ {\R{c_1\{c_2\}}{t_1\,t_2}}
+
+
+\inferrule*[right=R-Type-Lambda]{\Gamma,\alpha;\Delta\vdash c\Longrightarrow t}
+ {\R{\Lambda\alpha.c}{\Lambda\alpha.t}}
+
+\inferrule*[right=R-Type-App]{\R c t}{\R{c[A]}{t[\erase A]}}
+
+
+\inferrule*[right=R-Let]{\R{c_1}{t_1}\\\Gamma,x:A;\Delta\vdash c_2\Longrightarrow t_2}
+ {\R{\letin{x:A}{c_1}{c_2}}{\letin{x}{t_1}{t_2}}}
+
+
+\inferrule*[right=R-Impl]{\R{c_1}{t_1}\\\Gamma;(d:A)::\Delta\vdash c_2\Longrightarrow t_2}
+ {\R{\impl{d}{A}{c_1}{c_2}}{\letin{d}{t_1}{t_2}}}
+
+
+\inferrule*[right=R-Record]{\R{c_j}{t_j}\quad(j\in J)}
+ {\R{\{\ell_j=c_j\}_{j\in J}}{\{\ell_j=t_j\}_{j\in J}}}
+
+\inferrule*[right=R-Project]{\R c t}{\R{c.\ell}{t.\ell}}
+
+
+\inferrule*[right=R-Int]{ }{\R n n}
+
+\inferrule*[right=R-String]{ }{\R s s}
+
+\inferrule*[right=R-Bool]{ }{\R b b}
+
+\inferrule*[right=R-BinOp]{\R{c_1}{t_1}\\\R{c_2}{t_2}}
+ {\R{c_1\mathbin{\odot}c_2}{t_1\mathbin{\odot}t_2}}
+\end{mathpar}
+
+\newpage
+\section{Explicit target and independent typing}
+\[
+\begin{array}{rcl}
+T,U&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid T\to U\mid\forall\alpha.T\mid\{\ell_j:T_j\}_{j\in J}\\
+t&::=&z\mid n\mid b\mid s\mid\lam z T t\mid t\,t\mid\Lambda\alpha.t\mid t[T]\\
+&&\mid\letin z t t\mid\{\ell_j=t_j\}_{j\in J}\mid t.\ell
+ \mid t_1\mathbin{\odot}t_2\\
+H&::=&\cdot\mid H,\alpha\mid H,z:T
+\end{array}
+\]
+Target type formation is Section~1 with only the ordinary arrow. All annotations and
+type arguments must be well formed in $H$. All record labels are distinct.
+\begin{mathpar}
+
+\inferrule*[right=T-Var]{z:T\in H}{H\vdash z:T}
+
+\inferrule*[right=T-Lambda]{H,z:T\vdash t:U}{H\vdash\lam z T t:T\to U}
+
+\inferrule*[right=T-App]{H\vdash t_1:T\to U\\H\vdash t_2:T}{H\vdash t_1\,t_2:U}
+
+
+\inferrule*[right=T-Type-Lambda]{H,\alpha\vdash t:T\\\alpha\notin\mathrm{FV}(H)}
+ {H\vdash\Lambda\alpha.t:\forall\alpha.T}
+
+\inferrule*[right=T-Type-App]{H\vdash t:\forall\alpha.T\\H\vdash U\;\kw{type}}
+ {H\vdash t[U]:T[U/\alpha]}
+
+
+\inferrule*[right=T-Let]{H\vdash t_1:T\\H,z:T\vdash t_2:U}
+ {H\vdash\letin z{t_1}{t_2}:U}
+
+
+\inferrule*[right=T-Record]{H\vdash t_j:T_j\quad(j\in J)}
+ {H\vdash\{\ell_j=t_j\}_{j\in J}:\{\ell_j:T_j\}_{j\in J}}
+
+\inferrule*[right=T-Project]{H\vdash t:\{\ell_j:T_j\}_{j\in J}\\k\in J}
+ {H\vdash t.\ell_k:T_k}
+
+
+\inferrule*[right=T-Int]{n\in\mathbb Z}{H\vdash n:\Int}
+
+\inferrule*[right=T-String]{s\text{ a string}}{H\vdash s:\Str}
+
+\inferrule*[right=T-Bool]{b\in\{\mathsf{true},\mathsf{false}\}}{H\vdash b:\Bool}
+
+\inferrule*[right=T-BinOp]{H\vdash t_1:\argop\odot\\H\vdash t_2:\argop\odot}
+ {H\vdash t_1\mathbin{\odot}t_2:\resop\odot}
+\end{mathpar}
+
+\subsection*{Phase invariant and index representation}
+Let $H=\erase\Gamma\cup\erase\Delta$ merge the two term environments using the
+same globally fresh names. The phase invariant is
+\[
+\boxed{\E e A c\quad\land\quad\R c t\quad\Longrightarrow\quad H\vdash t:\erase A.}
+\]
+The reference implementation independently checks the final judgment; no mechanized
+metatheory is asserted here. The synthesizer is not a trusted source of typing derivations.
+
+In the implementation, ordinary and instance references have independent de Bruijn indices.
+The resolver maintains one embedding for each into the current target environment.
+Every new term binder increments all previously embedded target indices. An ordinary
+binder then extends only the $\Gamma$ embedding; an implementation binder extends only
+the $\Delta$ embedding. A type binder weakens type indices in both environments and
+in embedded evidence. Type substitution is capture avoiding.
+
+\newpage
+\section{Call-by-value evaluation}
+\[
+\begin{array}{rcl}
+v&::=& n\mid b\mid s\mid\{\ell_j=v_j\}_{j\in J}\mid
+ \langle\lambda z.t,\rho\rangle\mid\langle\Lambda\alpha.t,\rho\rangle,\\
+\rho&::=&\cdot\mid\rho[z\mapsto v].
+\end{array}
+\]
+Evaluation ignores type annotations and type arguments. Type abstraction creates a delayed
+closure; type application forces it. Records are evaluated in canonical label order.
+
+\begin{mathpar}
+
+\inferrule*[right=V-Var]{\rho(z)=v}{\eval\rho z v}
+
+\inferrule*[right=V-Int]{ }{\eval\rho n n}
+
+\inferrule*[right=V-String]{ }{\eval\rho s s}
+
+\inferrule*[right=V-Bool]{ }{\eval\rho b b}
+
+
+\inferrule*[right=V-Lambda]{ }
+ {\eval\rho{\lam z T t}{\langle\lambda z.t,\rho\rangle}}
+
+\inferrule*[right=V-Type-Lambda]{ }
+ {\eval\rho{\Lambda\alpha.t}{\langle\Lambda\alpha.t,\rho\rangle}}
+
+
+\inferrule*[right=V-App]{
+ \eval\rho{t_1}{\langle\lambda z.t,\rho_0\rangle}\\
+ \eval\rho{t_2}{v_2}\\\eval{\rho_0[z\mapsto v_2]}{t}{v}}
+ {\eval\rho{t_1\,t_2}{v}}
+
+
+\inferrule*[right=V-Type-App]{\eval\rho{t_0}{\langle\Lambda\alpha.t,\rho_0\rangle}\\
+ \eval{\rho_0}{t}{v}}
+ {\eval\rho{t_0[T]}{v}}
+
+
+\inferrule*[right=V-Let]{\eval\rho{t_1}{v_1}\\\eval{\rho[z\mapsto v_1]}{t_2}{v}}
+ {\eval\rho{\letin z{t_1}{t_2}}{v}}
+
+
+\inferrule*[right=V-Record]{\eval\rho{t_j}{v_j}\quad(j\in J)}
+ {\eval\rho{\{\ell_j=t_j\}_{j\in J}}{\{\ell_j=v_j\}_{j\in J}}}
+
+\inferrule*[right=V-Project]{\eval\rho t{\{\ell_j=v_j\}_{j\in J}}\\k\in J}
+ {\eval\rho{t.\ell_k}{v_k}}
+
+
+\inferrule*[right=V-BinOp]{\eval\rho{t_1}{v_1}\\\eval\rho{t_2}{v_2}\\
+ \delta_{\odot}(v_1,v_2)=v}
+ {\eval\rho{t_1\mathbin{\odot}t_2}v}
+\end{mathpar}
+
+\subsection*{Closed-program execution}
+\begin{mathpar}
+
+\inferrule*[right=Execute]{
+ \cdot;[\,]\vdash e:A\rightsquigarrow c\\
+ \cdot;[\,]\vdash c\Longrightarrow t\\
+ \cdot\vdash t:\erase A\\\eval\cdot t v}
+ {e\Downarrow_{\mathcal S}v}
+\end{mathpar}
+There is no runtime evidence search. Resolving an implementation binding produces an
+ordinary target \textsf{let}, so its value can close over ordinary runtime variables.
+The compiled value remains first-class; registration affects only lexical evidence scope.
+
+\end{document}

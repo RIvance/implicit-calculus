@@ -1,0 +1,21 @@
+trait ToString[A] = {
+  toString: A -> String
+}
+
+type Student = {
+  name: String
+  age: Int
+}
+
+impl ToString[String] {
+  toString = (text: String) => text
+}
+
+impl student: ToString[Student] {
+  toString = (s: Student) =>
+    "Student(" ++ ToString[String].toString(s.name) ++ ")"
+}
+
+def display[A where ToString[A]](x: A): String = x.toString
+
+display[Student]({ name = "Ada", age = 21 })
