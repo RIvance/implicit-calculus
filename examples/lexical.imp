@@ -1,3 +1,5 @@
+// result: outer: Ada / inner: Ada
+
 trait ToString[A] = { toString: A -> String }
 
 impl outer: ToString[String] = {

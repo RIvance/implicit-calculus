@@ -1,3 +1,5 @@
+// result: Ada
+
 trait ToString[A] = { toString: A -> String }
 trait Repr[A, B] = { repr: A -> B }
 type Person = { name: String }

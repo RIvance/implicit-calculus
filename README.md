@@ -272,17 +272,25 @@ operands. Results are `Int`, `Bool`, and `String` respectively. The parser follo
 ordinary arithmetic precedence (`*` before `+` / `-`), followed by `++` and comparisons.
 There is no special-purpose `Concat` or `ShowInt` expression.
 
-## Examples and expected results
+## Executable examples
 
-| File | Expected result |
-| --- | --- |
-| `display.imp` | `Student(Ada)` |
-| `first-class.imp` | `value = Ada` |
-| `lexical.imp` | `outer: Ada / inner: Ada` |
-| `explicit-override.imp` | `explicit: Ada` |
-| `polymorphic.imp` | `Ada` |
-| `operators.imp` | record with integer, boolean, and string results |
-| `needs-smt.imp` | `MissingInstance`; hidden intermediate type is not solved by the placeholder |
+`sbt test` recursively discovers all `.imp` files in `examples/`, ordered by path.
+Each file's first line specifies its expected outcome:
+
+```text
+// result: 21
+```
+
+or:
+
+```text
+// error: UnknownTerm(missing)
+```
+
+The text after the colon and optional separating space must match the CLI's rendered
+value or error exactly. String results use their contents without quotes. Missing or malformed
+headers, different output, and an unexpected success or failure fail the example's test.
+Adding an example requires no Scala test changes.
 
 Tests cover declaration parsing, Γ/Δ separation, scope and shadowing, type weakening,
 alias capture, first-class values, explicit implementation arguments, malformed types,

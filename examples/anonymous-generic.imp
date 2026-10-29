@@ -1,0 +1,11 @@
+// result: {first = 21, second = Ada}
+
+type Pair[A, B] = { first: A, second: B }
+
+impl [A, B where A and B]: Pair[A, B] = {
+  first = summon[A]
+  second = summon[B]
+}
+
+// Request the whole quantified type, then supply type and implicit arguments explicitly.
+summon[forall A, B. A ~> B ~> Pair[A, B]][Int, String](using 21, using "Ada")

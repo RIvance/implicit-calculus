@@ -11,6 +11,8 @@ import implicitlang.evaluation.Value
 import implicitlang.util.Result
 
 import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
+import scala.util.Using
 import scala.util.control.NonFatal
 
 /** Dependency-free executable tests, also wired to `sbt test`. */
@@ -45,6 +47,31 @@ object CalculusTests {
   private def run(source: String): Value = success(Pipeline.run(source))
 
   private def parse(source: String): Expr = success(new Parser().parse(source))
+
+  private def testExamples(directory: Path): Unit = {
+    val paths = Using.resource(Files.walk(directory)) { stream =>
+      stream.iterator().asScala
+        .filter(path => Files.isRegularFile(path) && path.getFileName.toString.endsWith(".imp"))
+        .toVector.sortBy(_.toString)
+    }
+    assert(paths.nonEmpty, s"No .imp examples found in $directory")
+    paths.foreach { path =>
+      test("example " + directory.relativize(path)) {
+        val source = Files.readString(path)
+        val expected: Result[String, String] = source.linesIterator.nextOption() match {
+          case Some(line) if line.startsWith("// result:") => {
+            Result.Ok(line.stripPrefix("// result:").stripPrefix(" "))
+          }
+          case Some(line) if line.startsWith("// error:") => {
+            Result.Err(line.stripPrefix("// error:").stripPrefix(" "))
+          }
+          case _ => throw new AssertionError("First line must be // result: value or // error: message")
+        }
+        val actual = Pipeline.run(source).map(_.show).mapError(_.toString)
+        assert(actual == expected, s"Expected $expected, received $actual")
+      }
+    }
+  }
 
   def main(arguments: Array[String]): Unit = {
     test("comma-separated and repeated definition parameters produce the same curried expression") {
@@ -684,33 +711,7 @@ object CalculusTests {
       }
     }
 
-    test("operator example combines numeric, boolean, and string values") {
-      val fields = Vector(
-        "equal" -> Value.Boolean(true),
-        "greater" -> Value.Boolean(true),
-        "less" -> Value.Boolean(true),
-        "message" -> Value.Text("value = three"),
-        "sum" -> Value.Integer(3)
-      )
-      assert(run(Files.readString(Path.of("examples", "operators.imp"))) == Value.Record(fields))
-    }
-
-    Vector(
-      "display.imp" -> "Student(Ada)",
-      "first-class.imp" -> "value = Ada",
-      "lexical.imp" -> "outer: Ada / inner: Ada",
-      "polymorphic.imp" -> "Ada",
-      "explicit-override.imp" -> "explicit: Ada"
-    ).foreach { case (file, expected) =>
-      test(s"example $file has its specified result") {
-        assert(run(Files.readString(Path.of("examples", file))) == Value.Text(expected))
-      }
-    }
-
-    test("the placeholder rejects a goal requiring polymorphic implementation composition") {
-      val source = Files.readString(Path.of("examples", "needs-smt.imp"))
-      expectFailure(Pipeline.compile(source)) { case Error.MissingInstance(_) => true; case _ => false }
-    }
+    testExamples(Path.of("examples"))
 
     test("baseline does not instantiate polymorphic implementations") {
       val generic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))

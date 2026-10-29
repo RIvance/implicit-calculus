@@ -1,0 +1,8 @@
+// result: 21
+
+let identity: forall A. A ~> A = [A] => (implicit value: A) => value
+
+identity[Int](using {
+  let n: Int = 20
+  n + 1
+})

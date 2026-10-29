@@ -1,0 +1,13 @@
+// result: 21
+
+type Box[A] = { value: A }
+
+// The outer braces group local bindings; the inner field assignment builds a record.
+let box: Box[Int] = {
+  let seed: Int = 20
+  impl Int = seed + 1
+  { value = summon[Int] }
+}
+
+// The implementation's scope has ended, but the record retains its value.
+box.value

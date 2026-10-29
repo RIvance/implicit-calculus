@@ -1,0 +1,17 @@
+// result: {field = Ada, method = Ada, qualified = Ada}
+
+trait ToString[A] = { toString: A -> String }
+type Person = { name: String }
+
+impl printer: ToString[Person] = {
+  toString = (p: Person) => p.name
+}
+
+let person: Person = { name = "Ada" }
+
+// Dot selects an existing field or finds an implicit method; :: requests a specific provider.
+{
+  field = person.name
+  method = person.toString
+  qualified = ToString[Person]::toString(person)
+}

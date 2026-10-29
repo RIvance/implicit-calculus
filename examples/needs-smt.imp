@@ -1,3 +1,5 @@
+// error: MissingInstance(Record(Vector((toString,Arrow(Record(Vector((name,StringType))),StringType)))))
+
 trait ToString[A] = { toString: A -> String }
 trait Repr[A, B] = { repr: A -> B }
 type Person = { name: String }

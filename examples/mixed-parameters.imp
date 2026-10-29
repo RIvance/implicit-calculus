@@ -1,0 +1,9 @@
+// result: 21
+
+// The where constraint precedes the written ordinary and implicit parameters.
+def choose[A where A](fallback: A, implicit preferred: A)(last: A): A = preferred
+
+impl Int = 11
+
+// Applying 0 requests the where argument; using 21 supplies preferred directly.
+choose[Int](0, using 21, 99)

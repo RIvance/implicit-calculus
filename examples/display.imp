@@ -1,3 +1,5 @@
+// result: Student(Ada)
+
 trait ToString[A] = {
   toString: A -> String
 }

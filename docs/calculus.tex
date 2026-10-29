@@ -322,6 +322,68 @@ $(\need{\hat P}).\mathit{field}$. Types remain separate from term receivers:
 Evidence resolution later supplies implementations for the resulting requests.
 
 \newpage
+\subsection*{Worked translations}
+The following complete programs illustrate how the translations compose. Symbols such as
+$v$ and $e_{\mathrm{body}}$ abbreviate subexpressions of the displayed mathematical tree.
+Generated binders are fresh and source-inaccessible.
+
+\textbf{1. Generic definitions with mixed parameters and arguments.}
+\begin{lstlisting}
+def choose[A where A](fallback: A, implicit preferred: A)(last: A): A = preferred
+impl Int = 11
+choose[Int](0, using 21, 99)
+\end{lstlisting}
+The definition introduces its type parameter, its generated constraint parameter, and then
+its three written parameters, in that order:
+\[
+\begin{aligned}
+v_{\kw{choose}}
+ &=\Lambda A.\ilam{d}{A}{
+   \lam{\kw{fallback}}{A}{
+   \ilam{\kw{preferred}}{A}{
+   \lam{\kw{last}}{A}{(\kw{preferred}:A)}}}},\\
+e
+ &=\letin{\kw{choose}}{v_{\kw{choose}}}{
+   \impl{i}{\Int}{11}{((\kw{choose}[\Int](0))\{21\})(99)}}.
+\end{aligned}
+\]
+Only the argument $21$ is marked implicit in the parsed call. When elaboration reaches
+the first ordinary argument $0$, it inserts the request for the leading \texttt{where}
+constraint. The unresolved call is therefore
+\[
+ ((\kw{choose}[\Int]\{\hole{\Int}\})(0))\{21\}(99).
+\]
+Resolution supplies $11$ for that request; $21$ is supplied directly to
+$\kw{preferred}$. The program returns $21$. Replacing the two parameter groups by
+\texttt{(fallback: A)(implicit preferred: A)(last: A)} gives the same abstract definition.
+
+\textbf{2. Typed bindings, brace groups, and local implementations.}
+\begin{lstlisting}
+type Box[A] = { value: A }
+let box: Box[Int] = {
+  let seed: Int = 20
+  impl Int = seed + 1
+  { value = summon[Int] }
+}
+box.value
+\end{lstlisting}
+The initializer's outer braces group its nested bindings; the inner field assignment
+constructs a record. Both type annotations become ascriptions:
+\[
+\begin{aligned}
+e_{\mathrm{body}}
+ &=\letin{\kw{seed}}{(20:\Int)}{
+   \impl{d}{\Int}{\kw{seed}+1}{\{\kw{value}=\need{\Int}\}}},\\
+e
+ &=\kw{type}\ \kw{Box}[A]=\{\kw{value}:A\}\ \kw{in}\\
+ &\qquad\letin{\kw{box}}{(e_{\mathrm{body}}:\kw{Box}[\Int])}{\kw{box}.\kw{value}}.
+\end{aligned}
+\]
+The newline after the closing brace starts the continuation of \texttt{let box}.
+The implementation is available while constructing the record; its scope ends before
+$\kw{box}.\kw{value}$. The record retains the value $21$, which is the program's result.
+
+\newpage
 \section{Typing and elaboration: functions and bindings}
 \subsection*{Judgments and name resolution}
 \[

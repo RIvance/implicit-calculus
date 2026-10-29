@@ -1,3 +1,5 @@
+// result: {equal = true, greater = true, less = true, message = value = three, sum = 3}
+
 // Distinct arithmetic, comparison, and string-concatenation operators.
 let n = (1 + 2 * 3) - 4
 let valid = n == 3

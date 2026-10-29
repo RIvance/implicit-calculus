@@ -1,3 +1,5 @@
+// result: value = Ada
+
 trait ToString[A] = { toString: A -> String }
 
 def makePrinter(prefix: String): ToString[String] = {
