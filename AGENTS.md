@@ -87,6 +87,8 @@ Examples:
 
 - **Incidental technology constraint** (BAD): Suppose the user asks you not to use Python in a project. You correctly implement everything in another language, but also rename the project to `Calculator - Python Free`, add "This project does not use Python" to the README, and introduce a check_no_python.sh script into the build. If Python avoidance is merely an implementation constraint rather than a meaningful project goal, these additions contribute nothing and make the project less coherent.
 
+- **Documentation as a compliance report** (BAD): After changing lambda syntax from `fun x => e` to `f => e`, you add "No `fun` keyword is required." to the language specification. This records an editing decision instead of explaining the current language, and makes readers consider a discarded alternative. Document the supported syntax and how it maps to the expression AST. Give detail to the contracts and transformations readers need to understand, rather than narrating which earlier forms were removed or which instructions were followed. Historical comparisons belong in migration guidance when readers actually need them.
+
 - **Fundamental correctness property** (GOOD): Suppose the user is developing a Lean formalization whose results must not depend on axioms. In this case, adding a script or CI check that detects axiom dependencies can be a valuable improvement. Axiom-freedom is directly related to the project's correctness guarantees, and automated verification helps preserve them. The fact that the requirement is phrased negatively does not make verification unnecessary.
 
 ### Judge Changes by Their Contribution to the Whole Project

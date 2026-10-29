@@ -106,28 +106,7 @@ final class Elaborator {
     case _ => value
   }
 
-  private def typeReference(expression: Expr, scope: Scope): Option[TypeExpr] = {
-    def collect(current: Expr, arguments: Vector[TypeExpr]): Option[TypeExpr] = current match {
-      case Expr.TypeApp(function, argument) => collect(function, argument +: arguments)
-      case Expr.Var(name) if
-        scope.aliases.contains(name) &&
-        !scope.typeNames.contains(name) &&
-        !scope.bindings.exists(_.name == name) => {
-        Some(TypeExpr.Named(name, arguments))
-      }
-      case _ => None
-    }
-    collect(expression, Vector.empty)
-  }
-
-  private def elaborate(expression: Expr, scope: Scope): Result[Elaborated, Error] = {
-    typeReference(expression, scope) match {
-      case Some(annotation) => resolveType(annotation, scope).map(tpe => Elaborated(ImplicitTerm.Need(tpe), tpe))
-      case None => elaborateTerm(expression, scope)
-    }
-  }
-
-  private def elaborateTerm(expression: Expr, scope: Scope): Result[Elaborated, Error] = expression match {
+  private def elaborate(expression: Expr, scope: Scope): Result[Elaborated, Error] = expression match {
     case Expr.Var(name) => scope.lookup(name)
     case Expr.Lam(name, annotation, body) => {
       for {
@@ -240,8 +219,17 @@ final class Elaborator {
         Type.Record(checked.map { case (label, value) => label -> value.tpe })
       )
     }
-    case Expr.Proj(record, label) => {
-      elaborate(record, scope).flatMap { checked =>
+    /*
+     * Γ; Δ ⊢ e:{ℓⱼ:Aⱼ}ⱼ∈J ⇝ c    k ∈ J
+     * ────────────────────────────────── E-Project
+     * Γ; Δ ⊢ e.ℓₖ:Aₖ ⇝ c.ℓₖ
+     *
+     * Γ; Δ ⊢ e:A ⇝ c    ℓ ∉ labels(A)    ℳΔ,A,ℓ = {(P,B)}
+     * ─────────────────────────────────────────────────── E-Method
+     * Γ; Δ ⊢ e.ℓ:B ⇝ (?P).ℓ c
+     */
+    case Expr.Select(receiver, label) => {
+      elaborate(receiver, scope).flatMap { checked =>
         val field = checked.tpe match {
           case Type.Record(fields) => fields.find(_._1 == label)
           case _ => None

@@ -1,6 +1,6 @@
 package implicitlang.parser
 
-import implicitlang.Error
+import implicitlang.{Error as LanguageError}
 import implicitlang.syntax.{Expr, TypeExpr, OpKind}
 
 import implicitlang.util.Result
@@ -12,7 +12,7 @@ final class Parser extends JavaTokenParsers {
   override protected val whiteSpace = """(\s+|//[^\r\n]*|(?s:/\*.*?\*/))+""".r
 
   private val reserved = Set(
-    "fun", "let", "val", "def", "impl", "trait", "type", "where", "and", "in", "forall",
+    "let", "def", "impl", "implicit", "using", "trait", "type", "where", "and", "in", "forall",
     "summon", "Int", "String", "Bool", "true", "false"
   )
 
@@ -25,6 +25,36 @@ final class Parser extends JavaTokenParsers {
     value => s"Reserved word '$value' cannot be a name"
   )
 
+  /** Inspect the same trivia that token parsers skip, retaining its declaration boundaries. */
+  private lazy val trivia: Parser[String] = Parser { input =>
+    val end = handleWhiteSpace(input.source, input.offset)
+    Success(input.source.subSequence(input.offset, end).toString, input.drop(end - input.offset))
+  }
+
+  private def hasNewline(text: String): Boolean = text.exists(character => character == '\n' || character == '\r')
+
+  private lazy val inlineTrivia: Parser[String] = trivia ^? (
+    { case text if !hasNewline(text) => text },
+    _ => "Expected continuation on the same line"
+  )
+
+  private lazy val newline: Parser[Unit] = trivia ^? (
+    { case text if hasNewline(text) => () },
+    _ => "Expected a newline"
+  )
+
+  private def sameLine[A](parser: => Parser[A]): Parser[A] = inlineTrivia ~> parser
+
+  private def adjacent[A](parser: => Parser[A]): Parser[A] = {
+    (trivia ^? { case text if text.isEmpty => () }) ~> parser
+  }
+
+  private lazy val fieldSeparator: Parser[Unit] = (("," | ";") ^^^ ()) | newline
+
+  private def fields[A](field: => Parser[A]): Parser[List[A]] = {
+    "{" ~> repsep(field, fieldSeparator) <~ opt(fieldSeparator) <~ "}"
+  }
+
   private lazy val tpe: Parser[TypeExpr] = universalType | arrowType
 
   private lazy val universalType: Parser[TypeExpr] =
@@ -32,7 +62,7 @@ final class Parser extends JavaTokenParsers {
       case parameters ~ body => parameters.foldRight(body)(TypeExpr.Forall.apply)
     }
 
-  private lazy val arrowType: Parser[TypeExpr] = typeAtom ~ opt(("->" | "=>") ~ tpe) ^^ {
+  private lazy val arrowType: Parser[TypeExpr] = typeAtom ~ opt(("->" | "~>") ~ tpe) ^^ {
     case parameter ~ Some("->" ~ result) => TypeExpr.Arrow(parameter, result)
     case parameter ~ Some(_ ~ result) => TypeExpr.Implicit(parameter, result)
     case parameter ~ None => parameter
@@ -43,8 +73,8 @@ final class Parser extends JavaTokenParsers {
     (keyword("String") ^^^ TypeExpr.StringType) |
     (keyword("Bool") ^^^ TypeExpr.BoolType) |
     ("(" ~> tpe <~ ")") |
-    (("{" ~> rep((name ~ (":" ~> tpe)) <~ opt("," | ";")) <~ "}") ^^ { fields =>
-      TypeExpr.Record(fields.map { case label ~ fieldType => label -> fieldType }.toVector)
+    (fields(name ~ (":" ~> tpe)) ^^ { items =>
+      TypeExpr.Record(items.map { case label ~ fieldType => label -> fieldType }.toVector)
     }) |
     (name ~ opt("[" ~> rep1sep(tpe, ",") <~ "]") ^^ {
       case identifier ~ arguments => TypeExpr.Named(identifier, arguments.getOrElse(Nil).toVector)
@@ -53,7 +83,8 @@ final class Parser extends JavaTokenParsers {
   private lazy val expression: Parser[Expr] =
     typeBinding | functionBinding | implementation | ordinaryLet | lambda | ascription
 
-  private lazy val continuation: Parser[Expr] = opt(keyword("in") | ";") ~> expression
+  private lazy val continuation: Parser[Expr] =
+    (((keyword("in") | ";") ^^^ ()) | newline) ~> expression
 
   private lazy val typeBinding: Parser[Expr] =
     ((keyword("type") | keyword("trait")) ~> name) ~ opt("[" ~> rep1sep(name, ",") <~ "]") ~
@@ -67,10 +98,20 @@ final class Parser extends JavaTokenParsers {
       case parameters ~ constraints => parameters -> constraints.getOrElse(Nil)
     }
 
-  private lazy val parameters: Parser[List[(String, TypeExpr)]] =
-    "(" ~> rep1sep(name ~ (":" ~> tpe), ",") <~ ")" ^^ { items =>
-      items.map { case identifier ~ annotation => identifier -> annotation }
+  // Each parameter constructs its own binder, so mixed lists retain their source order and kind.
+  private lazy val parameter: Parser[Expr => Expr] =
+    opt(keyword("implicit")) ~ name ~ (":" ~> tpe) ^^ {
+      case Some(_) ~ identifier ~ annotation => (body: Expr) => Expr.ImplicitLam(identifier, annotation, body)
+      case None ~ identifier ~ annotation => (body: Expr) => Expr.Lam(identifier, annotation, body)
     }
+
+  private lazy val parameters: Parser[List[Expr => Expr]] = "(" ~> rep1sep(parameter, ",") <~ ")"
+
+  private lazy val parameterGroups: Parser[List[Expr => Expr]] = rep1(parameters) ^^ (_.flatten)
+
+  private def abstractParameters(binders: List[Expr => Expr], body: Expr): Expr = {
+    binders.foldRight(body)((bind, result) => bind(result))
+  }
 
   private def abstractImplicit(
     header: Option[(List[String], List[TypeExpr])],
@@ -92,64 +133,51 @@ final class Parser extends JavaTokenParsers {
   }
 
   private lazy val functionBinding: Parser[Expr] =
-    (keyword("def") ~> name) ~ opt(genericHeader) ~ parameters ~ (":" ~> tpe) ~
+    (keyword("def") ~> name) ~ opt(genericHeader) ~ parameterGroups ~ (":" ~> tpe) ~
       ("=" ~> expression) ~ continuation ^^ {
         case identifier ~ header ~ arguments ~ resultType ~ value ~ body => {
-          val ordinary = arguments.foldRight[Expr](Expr.Ascribe(value, resultType)) {
-            case ((parameter, annotation), result) => Expr.Lam(parameter, annotation, result)
-          }
-          Expr.Let(identifier, abstractImplicit(header, ordinary), body)
+          val parameterized = abstractParameters(arguments, Expr.Ascribe(value, resultType))
+          Expr.Let(identifier, abstractImplicit(header, parameterized), body)
         }
       }
 
-  private lazy val implementation: Parser[Expr] = keyword("impl") ~> (namedImplementation | anonymousImplementation)
+  // The colon distinguishes a binder header from an anonymous implementation's target type, e.g. C[A].
+  private lazy val implementationHeader: Parser[(String, Option[(List[String], List[TypeExpr])])] = (
+    (name ~ opt(genericHeader) ^^ { case identifier ~ header => identifier -> header }) |
+    (genericHeader ^^ { header => "@anonymous" -> Some(header) })
+  ) <~ ":"
 
-  private lazy val namedImplementation: Parser[Expr] =
-    name ~ opt(genericHeader) ~ (":" ~> tpe) ~ (("=" ~> expression) | record) ~ continuation ^^ {
-      case identifier ~ header ~ annotation ~ value ~ body => {
-        Expr.Impl(identifier, qualifyType(header, annotation), abstractImplicit(header, value), body)
+  private lazy val implementation: Parser[Expr] =
+    (keyword("impl") ~> opt(implementationHeader)) ~ tpe ~ ("=" ~> expression) ~ continuation ^^ {
+      case header ~ annotation ~ value ~ body => {
+        val (identifier, generics) = header.getOrElse("@anonymous" -> None)
+        Expr.Impl(identifier, qualifyType(generics, annotation), abstractImplicit(generics, value), body)
       }
     }
 
-  private lazy val anonymousImplementation: Parser[Expr] = tpe ~ record ~ continuation ^^ {
-    case annotation ~ value ~ body => Expr.Impl("@anonymous", annotation, value, body)
-  }
-
   private lazy val ordinaryLet: Parser[Expr] =
-    (keyword("let") ~> valueBinding(keyword("in") ~> expression)) |
-    (keyword("val") ~> valueBinding(continuation))
-
-  private def valueBinding(rest: => Parser[Expr]): Parser[Expr] = {
-    name ~ opt(":" ~> tpe) ~ ("=" ~> expression) ~ rest ^^ {
+    (keyword("let") ~> name) ~ opt(":" ~> tpe) ~ ("=" ~> expression) ~ continuation ^^ {
       case identifier ~ annotation ~ value ~ body => {
         val checked = annotation.fold(value)(Expr.Ascribe(value, _))
         Expr.Let(identifier, checked, body)
       }
     }
-  }
 
   private lazy val lambda: Parser[Expr] =
-    (opt(keyword("fun")) ~> parameters) ~ ("=>" ~> expression) ^^ {
-      case arguments ~ body => arguments.foldRight(body) {
-        case ((parameter, annotation), result) => Expr.Lam(parameter, annotation, result)
-      }
+    parameterGroups ~ ("=>" ~> expression) ^^ {
+      case arguments ~ body => abstractParameters(arguments, body)
     } |
-    (keyword("fun") ~> (
-      (("[" ~> rep1sep(name, ",") <~ "]") ~ ("=>" ~> expression) ^^ {
-        case variables ~ body => variables.foldRight(body)(Expr.TypeLam.apply)
-      }) |
-      (("{" ~> name) ~ (":" ~> tpe <~ "}") ~ ("=>" ~> expression) ^^ {
-        case identifier ~ annotation ~ body => Expr.ImplicitLam(identifier, annotation, body)
-      })
-    ))
+    (("[" ~> rep1sep(name, ",") <~ "]") ~ ("=>" ~> expression) ^^ {
+      case variables ~ body => variables.foldRight(body)(Expr.TypeLam.apply)
+    })
 
-  private lazy val ascription: Parser[Expr] = comparison ~ opt(":" ~> tpe) ^^ {
+  private lazy val ascription: Parser[Expr] = comparison ~ opt(sameLine(":" ~> tpe)) ^^ {
     case value ~ Some(annotation) => Expr.Ascribe(value, annotation)
     case value ~ None => value
   }
 
   private def binary(token: Parser[String], kind: OpKind): Parser[(Expr, Expr) => Expr] = {
-    token ^^^ { (left: Expr, right: Expr) => Expr.BinOp(kind, left, right) }
+    sameLine(token) ^^^ { (left: Expr, right: Expr) => Expr.BinOp(kind, left, right) }
   }
 
   private lazy val comparison: Parser[Expr] = chainl1(
@@ -164,33 +192,55 @@ final class Parser extends JavaTokenParsers {
     binary("""\+(?!\+)""".r, OpKind.Add) | binary("-", OpKind.Sub)
   )
 
-  private lazy val multiplication: Parser[Expr] = chainl1(postfix, binary("*", OpKind.Mul))
+  private lazy val multiplication: Parser[Expr] = chainl1(application, binary("*", OpKind.Mul))
 
-  private lazy val postfix: Parser[Expr] = atom ~ rep(suffix) ^^ {
+  private lazy val application: Parser[Expr] = postfix ~ rep(
+    sameLine(suffix) | (spacedArgument ^^ { argument => (function: Expr) => Expr.App(function, argument) })
+  ) ^^ {
+    case initial ~ operations => operations.foldLeft(initial)((value, operation) => operation(value))
+  }
+
+  // A bare negative argument would conflict with subtraction; use f(-1) or f (-1).
+  private lazy val spacedArgument: Parser[Expr] =
+    (inlineTrivia ^? { case text if text.nonEmpty => () }) ~> not("-") ~> postfix
+
+  // Adjacent suffixes belong to an argument: f g(x) = f(g(x)), but f g (x) = f(g)(x).
+  private lazy val postfix: Parser[Expr] = atom ~ rep(adjacent(suffix)) ^^ {
     case initial ~ operations => operations.foldLeft(initial)((value, operation) => operation(value))
   }
 
   // A suffix is an AST transformation, not a second syntax representation.
   private lazy val suffix: Parser[Expr => Expr] =
-    (("(" ~> rep1sep(expression, ",") <~ ")") ^^ { arguments =>
-      (function: Expr) => arguments.foldLeft(function)(Expr.App.apply)
+    (("(" ~> rep1sep(argument, ",") <~ ")") ^^ { applications =>
+      (function: Expr) => applications.foldLeft(function)((current, applyArgument) => applyArgument(current))
     }) |
     (("[" ~> rep1sep(tpe, ",") <~ "]") ^^ { arguments =>
       (function: Expr) => arguments.foldLeft(function)(Expr.TypeApp.apply)
     }) |
-    (("{" ~> expression <~ "}") ^^ { argument => (function: Expr) => Expr.ImplicitApp(function, argument) }) |
-    (("." ~> name) ^^ { label => (receiver: Expr) => Expr.Proj(receiver, label) })
+    (braced ^^ { value => (function: Expr) => Expr.App(function, value) }) |
+    (("." ~> name) ^^ { label => (receiver: Expr) => Expr.Select(receiver, label) })
+
+  // Like implicit on parameters, using belongs to one argument rather than the entire list.
+  private lazy val argument: Parser[Expr => Expr] = opt(keyword("using")) ~ expression ^^ {
+    case Some(_) ~ value => (function: Expr) => Expr.ImplicitApp(function, value)
+    case None ~ value => (function: Expr) => Expr.App(function, value)
+  }
 
   private lazy val record: Parser[Expr] =
-    ("{" ~> rep((name ~ ("=" ~> expression)) <~ opt("," | ";")) <~ "}") ^^ { fields =>
-      Expr.Record(fields.map { case label ~ value => label -> value }.toVector)
+    fields(name ~ ("=" ~> expression)) ^^ { items =>
+      Expr.Record(items.map { case label ~ value => label -> value }.toVector)
     }
 
+  /** Braces either form a record literal or group one expression without adding an AST node. */
+  private lazy val braced: Parser[Expr] = record | ("{" ~> expression <~ "}")
+
   private lazy val atom: Parser[Expr] =
+    ((tpe <~ sameLine("::")) ~ name ^^ {
+      case annotation ~ label => Expr.Select(Expr.Need(annotation), label)
+    }) |
     ((keyword("summon") ~> "[" ~> tpe <~ "]") ^^ Expr.Need.apply) |
     ("(" ~> expression <~ ")") |
-    record |
-    ("{" ~> expression <~ "}") |
+    braced |
     (keyword("true") ^^^ Expr.BoolLit(true)) |
     (keyword("false") ^^^ Expr.BoolLit(false)) |
     (stringLiteral ^^ { text => Expr.StringLit(decodeString(text)) }) |
@@ -202,11 +252,11 @@ final class Parser extends JavaTokenParsers {
     val output = new StringBuilder
     var index = 0
     while index < input.length do {
-      if input(index) != '\\' then {
-        output.append(input(index))
+      if input.charAt(index) != '\\' then {
+        output.append(input.charAt(index))
         index += 1
       } else {
-        input(index + 1) match {
+        input.charAt(index + 1) match {
           case 'u' => {
             output.append(Integer.parseInt(input.substring(index + 2, index + 6), 16).toChar)
             index += 6
@@ -229,10 +279,10 @@ final class Parser extends JavaTokenParsers {
     output.toString
   }
 
-  def parse(source: String): Result[Expr, implicitlang.Error] = parseAll(expression <~ opt(";"), source) match {
+  def parse(source: String): Result[Expr, LanguageError] = parseAll(expression <~ opt(";"), source) match {
     case Success(value, _) => Result.Ok(value)
     case failure: NoSuccess => {
-      Result.Err(Error.Parse(failure.msg, failure.next.pos.line, failure.next.pos.column))
+      Result.Err(LanguageError.Parse(failure.msg, failure.next.pos.line, failure.next.pos.column))
     }
   }
 }

@@ -4,11 +4,11 @@ def makePrinter(prefix: String): ToString[String] = {
   toString = (text: String) => prefix ++ text
 }
 
-val printer = makePrinter("value = ")
+let printer = makePrinter("value = ")
 
 def install(chosen: ToString[String]): String = {
-  impl active: ToString[String] = chosen in
-  ToString[String].toString("Ada")
+  impl active: ToString[String] = chosen
+  ToString[String]::toString("Ada")
 }
 
 install(printer)

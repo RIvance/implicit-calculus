@@ -1,13 +1,13 @@
 trait ToString[A] = { toString: A -> String }
 
-impl outer: ToString[String] {
+impl outer: ToString[String] = {
   toString = (text: String) => "outer: " ++ text
 }
 
-def captured(text: String): String = ToString[String].toString(text)
+def captured(text: String): String = ToString[String]::toString(text)
 
-impl inner: ToString[String] {
+impl inner: ToString[String] = {
   toString = (text: String) => "inner: " ++ text
 }
 
-captured("Ada") ++ " / " ++ ToString[String].toString("Ada")
+captured("Ada") ++ " / " ++ ToString[String]::toString("Ada")

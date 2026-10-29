@@ -18,11 +18,6 @@ sbt 'runMain implicitlang.cli.Main examples/polymorphic.imp'
 The pinned dependencies are Scala 3.3.6, scala-parser-combinators 2.4.0, and sbt 1.10.7.
 Tests use a small executable harness rather than an additional testing library.
 
-**Verification status:** the PDF has been compiled and its rendered pages inspected.
-Scala compilation and the executable tests have NOT been run in the authoring environment:
-Java is available, but Scala/sbt are absent and the Maven repository is not reachable from this container. The expected
-results below are specifications, not claims of observed executions.
-
 ## Surface syntax stays practical
 
 ```text
@@ -30,7 +25,7 @@ trait ToString[A] = { toString: A -> String }
 
 type Student = { name: String, age: Int }
 
-impl student: ToString[Student] {
+impl student: ToString[Student] = {
   toString = (s: Student) => "Student(" ++ s.name ++ ")"
 }
 
@@ -50,33 +45,112 @@ rest
 becomes the same `Expr` as:
 
 ```text
-let display = fun [A] => fun {printer: ToString[A]} => (x: A) => (body: String)
+let display = [A] => (implicit printer: ToString[A]) => (x: A) => (body: String)
 in rest
 ```
 
 The generated implementation parameter has an unspellable internal name, not `printer`.
 `trait` and `type` introduce lexical, nonrecursive type synonyms. Both are represented by
 `Expr.TypeLet`; trait names disappear by expansion to ordinary record types.
-Named and anonymous implementations are accepted:
+Implementations have one form with optional naming and an optional generic header:
 
 ```text
-impl printer: ToString[String] { toString = (s: String) => s }
-impl ToString[String] { toString = (s: String) => s }
+impl ToString[String] = value
+impl printer: ToString[String] = value
+impl [A where C[A]]: D[A] = expression
+impl derive[A where C[A]]: D[A] = expression
 ```
 
-A generic implementation is an ordinary polymorphic value with implicit arrows:
+`=` is required in every form. The initializer may be any expression: a record, an existing
+value, a function call, a lambda, or a brace group. A name or generic header is followed by
+`:`; without either, the type follows `impl` directly. Thus `ToString[String]` in the first
+form is the target type, while `[A where C[A]]` introduces type parameters and constraints.
+All forms become `Expr.Impl`; an anonymous binding has an unspellable internal name.
+Both enter the implicit environment, and a named binding can also be referred to directly.
+
+A generic implementation is an ordinary polymorphic value with implicit arrows. For example:
 
 ```text
-impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] {
-  toString = (x: A) => ToString[B].toString(Repr[A, B].repr(x))
+impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] = {
+  toString = (x: A) => ToString[B]::toString(Repr[A, B]::repr(x))
 }
 ```
 
-`and` and commas both separate constraints. Record fields may be separated by commas,
-semicolons, or whitespace. `++` concatenates strings; `+` is integer addition. Function/type application
-is explicit: `f(x)`, `f[A]`; `f{e}` supplies an implementation argument explicitly.
-Use parentheses to disambiguate ascriptions and `;` at a declaration boundary when the
-next expression starts with a postfix delimiter such as `(`, `[` or `{`.
+Omitting `via` makes this implementation anonymous, with the same type and initializer.
+`and` and commas both separate constraints. Comma-separated parameters and repeated parameter
+groups are curried, as are argument lists and whitespace application:
+
+```text
+def f[T](a: A, b: B): R = e    // same as def f [T] (a: A) (b: B) : R = e
+(a: A, b: B) => e             // same as (a: A) => (b: B) => e
+f(a, b)                      // same as f(a)(b), f a b, or f a (b)
+```
+
+Groups can be mixed, as in `def f(a: A, b: B)(c: C): R = e` and `(a: A)(b: B) => e`.
+Mark each implicit parameter individually. The same parameter grammar is used in lambdas
+and definitions. The `where` syntax for constraints remains available on definitions and
+generic implementations, including `def display[A where ToString[A]](x: A): String = x.toString`.
+Named implicit parameters can also be mixed with ordinary parameters:
+
+```text
+(a: A, implicit b: B, c: C) => body
+// equivalent to (a: A) => (implicit b: B) => (c: C) => body
+def f(a: A, implicit b: B, c: C): R = body
+```
+
+Only `b` enters the implicit environment; `a` and `c` remain ordinary parameters.
+The function type is `A -> B ~> C -> R`. Calling `f(a, c)` searches for `b`, while
+`f(a, using b, c)` (equivalently `f(a)(using b)(c)`) supplies it explicitly.
+`using` is a keyword that marks only the following argument: `f(using a, b)` passes `a`
+implicitly and `b` ordinarily. Write `f(using a, using b)` to supply both implicitly.
+A trailing implicit parameter remains a first-class
+implicit function until applied. Type lambdas use `[T] => body`, for example
+`[T] => (x: T) => x`. All lambda bodies use `=>`; implicit function types use `~>`.
+The mathematical notation remains `λ{d:A}` and `A ⇒ B`.
+
+Application associates to the left and binds more tightly than binary operators. Adjacent
+postfix operations bind within an argument: `f g(x)` means `f(g(x))`, while `f g (x)` means
+`f(g)(x)`. Likewise, `f x.field` passes `x.field` to `f`. Type application remains explicit
+with `f[T]`; `f(using e)` supplies an implementation argument explicitly. Use `f(-1)` or `f (-1)`
+for a negative argument; `f x - 1` is subtraction. `++` concatenates strings; `+` adds integers.
+
+Ordinary bindings use `let a = e in body` or `let a: A = e in body`. The typed form becomes
+`Expr.Let(a, Expr.Ascribe(e, A), body)`. No new expression node is needed.
+For `let`, `impl`, `def`, `type`, and `trait`, `in` may be replaced by a newline or `;`:
+
+```text
+let answer: Int = 21
+impl selected: Int = answer
+summon[Int]
+```
+
+A newline after a complete initializer separates it from the body, including a body beginning
+with `(` or `{`. Application, projection, and binary operators do not continue across that
+newline. Line breaks are allowed where an operand or body is still required, such as after
+`=`, `=>`, or `+`, and inside argument lists such as `f(\n a,\n b\n)`.
+Comments count as whitespace; newlines inside comments also separate declarations.
+Same-line declarations require `in` or `;`.
+
+Braces group one expression just like parentheses: `{ body }` and `(body)` produce the
+same AST. The expression may contain scoped declarations:
+
+```text
+let answer = {
+  let value = 20
+  value + 1
+}
+answer
+```
+
+There is no block node or statement sequence. `f { body }` and `f{body}` are ordinary
+applications equivalent to `f(body)`. Explicit implicit arguments use `f(using value)`
+and may themselves contain a group, as in `f(using { let x = 20 in x + 1 })`.
+Field syntax distinguishes record literals such as `{ value = 21 }` from grouped expressions;
+`{}` remains the empty record. A record can be passed as an ordinary argument with
+`f { value = 21 }` or as an explicit implicit argument with `f(using { value = 21 })`.
+
+Record types and values require commas, semicolons, or newlines between fields; spaces alone
+do not separate fields. A trailing field separator is allowed.
 
 ## Two term environments
 
@@ -93,12 +167,12 @@ An `impl` is a *scoped binding of a value*, not a global registration:
 ```text
 def install(chosen: ToString[String]): String = {
   impl active: ToString[String] = chosen in
-  ToString[String].toString("Ada")
+  ToString[String]::toString("Ada")
 }
 ```
 
 Implementations can be returned, stored in records, passed as ordinary arguments, referred
-to by name, or supplied through `f{e}`. Only binding a value with `impl` (or an implicit
+to by name, or supplied through `f(using e)`. Only binding a value with `impl` (or an implicit
 lambda) makes it available to search. A value in Γ is never implicitly registered.
 Implementation bindings are nonrecursive. Functions capture the implementations in their
 lexical definition scope; an inner implementation cannot retroactively change a closure.
@@ -115,19 +189,28 @@ text
 ```
 
 Name/type elaboration never invokes the synthesizer. It expands synonyms, resolves names,
-checks types, and inserts `ImplicitTerm.Need` nodes. The core distinguishes `A -> B` from `A => B`.
+checks types, and inserts `ImplicitTerm.Need` nodes. The core distinguishes `A -> B` from `A ~> B`.
 Ordinary application inserts missing arguments for leading implicit arrows only; variable
-lookup does not eagerly force an implicit function. An explicit `f{e}` does not search.
+lookup does not eagerly force an implicit function. An explicit `f(using e)` does not search.
 Type applications are not inferred and do not automatically pass intervening implicit arrows.
 
-`ToString[A]` in term position denotes an evidence request for the expanded type, unless a
-term binding shadows that alias name. `summon[ToString[A]]` is the explicit equivalent.
-`x.method` first tries an actual record field. Otherwise it uses the unique record **type**
+`ToString[A]::toString(x)` selects a member of an implementation requested for `ToString[A]`.
+In general, `P::member` means `summon[P].member`: the parser constructs
+`Expr.Select(Expr.Need(P), member)` and resolves `P` in the type namespace during elaboration.
+Types are not term values: a bare `ToString[A]` or `ToString[A].toString` is invalid when
+`ToString` names a type. An implementation value can be requested explicitly with
+`summon[ToString[A]]`. Ordinary values, including values with the same spelling as a type,
+use dotted selection.
+
+Every `x.method` parses as `Expr.Select(x, method)` for any receiver expression; the raw
+AST has no `Proj`. Elaboration first checks the receiver's type and tries an actual record
+field. If found, it emits `ImplicitTerm.Proj`. Otherwise it uses the unique record **type**
 in Δ whose `method` field has type `typeOf(x) -> R`, generating a deferred request for that
-record type and applying the method to `x`. Equal candidate record types are deduplicated;
+record type and applying its projected method to `x`. This fallback also applies to records
+without the requested field. Equal candidate record types are deduplicated;
 distinct candidates are an error. This deliberately limited sugar handles `x.toString`
 inside `display` without introducing a class registry or doing evidence search in elaboration.
-For a goal that needs more inference, write `ToString[A].toString(x)` explicitly.
+For a goal that needs more inference, write `ToString[A]::toString(x)` explicitly.
 
 ## Replaceable synthesis
 

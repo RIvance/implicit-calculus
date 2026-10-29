@@ -1,4 +1,4 @@
 // Distinct arithmetic, comparison, and string-concatenation operators.
-val n = (1 + 2 * 3) - 4
-val valid = n == 3;
+let n = (1 + 2 * 3) - 4
+let valid = n == 3
 { sum = n, less = n < 4, greater = n > 2, equal = valid, message = "value" ++ " = three" }

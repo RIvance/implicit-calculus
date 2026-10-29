@@ -2,19 +2,19 @@ trait ToString[A] = { toString: A -> String }
 trait Repr[A, B] = { repr: A -> B }
 type Person = { name: String }
 
-impl string: ToString[String] {
+impl string: ToString[String] = {
   toString = (text: String) => text
 }
 
-impl personName: Repr[Person, String] {
+impl personName: Repr[Person, String] = {
   repr = (person: Person) => person.name
 }
 
-impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] {
-  toString = (x: A) => ToString[B].toString(Repr[A, B].repr(x))
+impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] = {
+  toString = (x: A) => ToString[B]::toString(Repr[A, B]::repr(x))
 }
 
 // The producer is a first-class value. Supply its type and implementation arguments explicitly.
-impl person: ToString[Person] = via[Person, String]{personName}{string}
+impl person: ToString[Person] = via[Person, String](using personName, using string)
 
-ToString[Person].toString({ name = "Ada" })
+ToString[Person]::toString({ name = "Ada" })

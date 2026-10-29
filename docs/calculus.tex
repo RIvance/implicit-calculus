@@ -54,7 +54,7 @@ values, nearest first. $P,Q$ are ordinary types, not a distinct predicate sort.
 Record labels are distinct and canonically ordered. Equality is structural, modulo
 $\alpha$-equivalence and lexical type-synonym expansion. There is no subtyping.
 
-\textbf{First expression AST} (after type-name expansion):
+\textbf{Expression notation for the typing rules} (with resolved annotation types):
 \[
 \begin{array}{rcl}
 e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}
@@ -64,7 +64,12 @@ e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}
  \mid e_1\mathbin{\odot}e_2
 \end{array}
 \]
-The actual named AST additionally has $\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ e$.
+Before elaboration, annotation types may contain unexpanded names $C[\bar A]$, and
+expressions may contain lexical bindings $\kw{type}\ C[\bar a]=A\ \kw{in}\ e$.
+Section~\ref{sec:syntax} gives the source-to-AST translation; elaboration resolves
+annotations and expands type synonyms.
+The syntax $e.\ell$ is an unclassified selection with an arbitrary term receiver. Elaboration determines
+whether a selection becomes a core projection or a method applied to its receiver.
 Both $x$ and $d$ are parsed as names; lexical name resolution distinguishes their binders.
 In rules, bound names are globally fresh by $\alpha$-renaming. This convention preserves
 ordinary source shadowing without conflating the two environments.
@@ -119,72 +124,206 @@ Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
 
 \newpage
 \section{Practical syntax and the first AST}
+\label{sec:syntax}
+The source language translates into the named abstract syntax used by the calculus.
+Parsing determines grouping and expands syntactic sugar: parameter lists become nested
+binders, calls become nested applications, and declarations bind the rest of the expression.
+Names, type annotations, and selections remain unresolved until elaboration.
+
+Write $\hat e$ for the abstract expression obtained from source $e$, and $\hat A$ for
+the named type annotation obtained from source $A$. The mappings below use the mathematical
+constructors of Section~1, extended with lexical type bindings and unexpanded type names.
+
+\subsection*{Types and expression forms}
+\begin{center}
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Source type & Named abstract type\\
+\midrule
+\texttt{Int}, \texttt{String}, \texttt{Bool} & $\Int,\ \Str,\ \Bool$\\
+$C$, $C[A_1,\ldots,A_n]$ & $C$, $C[\hat A_1,\ldots,\hat A_n]$\\
+\texttt{A -> B} & $\hat A\to\hat B$\\
+\texttt{A \textasciitilde{}> B} & $\hat A\Rightarrow\hat B$\\
+$\texttt{forall }a_1,\ldots,a_n\texttt{. }B$ & $\forall a_1.\cdots\forall a_n.\hat B$\\
+$\{\ell_1:A_1,\ldots,\ell_n:A_n\}$ & $\{\ell_1:\hat A_1,\ldots,\ell_n:\hat A_n\}$\\
+$(A)$ & $\hat A$\\
+\bottomrule
+\end{tabular}
+\end{center}
+Both arrows associate to the right. A type name is retained as written; elaboration
+determines whether it denotes a bound type variable or a lexical synonym.
+
+Names and literals translate to $x$, $n$, $b$, and $s$; string escapes are decoded.
+The remaining nonbinding forms translate as follows:
+\begin{center}
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Source expression & Named abstract expression\\
+\midrule
+$\{\ell_1=e_1,\ldots,\ell_n=e_n\}$ & $\{\ell_1=\hat e_1,\ldots,\ell_n=\hat e_n\}$\\
+\texttt{e: A} & $(\hat e:\hat A)$\\
+\texttt{summon[A]} & $\need{\hat A}$\\
+\texttt{e.field} & $\hat e.\mathit{field}$\\
+\texttt{P::field} & $(\need{\hat P}).\mathit{field}$\\
+\texttt{f(a)}, \texttt{f a} & $\hat f(\hat a)$\\
+\texttt{f(using a)} & $\hat f\{\hat a\}$\\
+\texttt{f[A]} & $\hat f[\hat A]$\\
+$e_1\mathbin{\odot}e_2$ & $\hat e_1\mathbin{\odot}\hat e_2$\\
+\texttt{(e)}, \texttt{\{ e \}} & $\hat e$\\
+\bottomrule
+\end{tabular}
+\end{center}
+Field assignments distinguish a record literal from a brace group; \texttt{\{\}} is
+the empty record. A grouped expression can itself contain declarations.
+Consequently, \texttt{f \{ e \}} translates to the ordinary application $\hat f(\hat e)$.
+Binary operators use the primitive operations specified in Section~1.
+
+\subsection*{Binders and application lists}
+A parameter group contains one or more comma-separated entries
+\texttt{x: A} or \texttt{implicit d: P}. Concatenate repeated groups in source order
+to obtain $\bar p=[p_1,\ldots,p_n]$. Each entry wraps an abstract body $E$:
+\[
+\begin{aligned}
+\mathcal L_{x:A}(E)&=\lam{x}{\hat A}{E},\\
+\mathcal L_{\texttt{implicit }d:P}(E)&=\ilam{d}{\hat P}{E},\\
+\mathcal L_{\bar p}(E)&=
+ \mathcal L_{p_1}(\mathcal L_{p_2}(\cdots\mathcal L_{p_n}(E)\cdots)).
+\end{aligned}
+\]
+A lambda \texttt{(}$\bar p$\texttt{) => e} translates to $\mathcal L_{\bar p}(\hat e)$.
+Comma-separated parameters and repeated groups therefore produce the same nested binders,
+with the first parameter outermost. For example:
+\[
+\texttt{(a: A, implicit b: B, c: C) => e}
+ \quad\longmapsto\quad
+ \lam{a}{\hat A}{\ilam{b}{\hat B}{\lam{c}{\hat C}{\hat e}}}.
+\]
+Type lambdas \texttt{[}$a_1,\ldots,a_n$\texttt{] => e} translate to
+$\Lambda a_1.\cdots\Lambda a_n.\hat e$.
+
+Argument lists instead accumulate applications from left to right. Each \texttt{using}
+marks just its own argument; type-argument lists likewise produce successive type applications:
+\[
+\begin{aligned}
+\texttt{f(a, using b, c)}&\longmapsto ((\hat f(\hat a))\{\hat b\})(\hat c),\\
+\texttt{f[A, B]}&\longmapsto(\hat f[\hat A])[\hat B].
+\end{aligned}
+\]
+Automatic insertion of missing implicit arguments belongs to elaboration of ordinary
+application; the parser preserves the applications actually written.
+
+\subsection*{Declarations and generic headers}
+A declaration takes a continuation $b$, the rest of the expression.
+In the mappings below, \texttt{;} stands for \texttt{in}, a semicolon, or a newline.
+A sequence therefore becomes nested bindings around its final expression.
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Source declaration and continuation & Named abstract expression\\
+\midrule
+\texttt{let x = e; b} & $\letin{x}{\hat e}{\hat b}$\\
+\texttt{let x: A = e; b} & $\letin{x}{(\hat e:\hat A)}{\hat b}$\\
+$\texttt{type }C[\bar a]\texttt{ = A; b}$
+ & $\kw{type}\ C[\bar a]=\hat A\ \kw{in}\ \hat b$\\
+$\texttt{trait }C[\bar a]\texttt{ = A; b}$
+ & $\kw{type}\ C[\bar a]=\hat A\ \kw{in}\ \hat b$\\
+\bottomrule
+\end{tabular}
+\end{center}
+An omitted type-parameter list supplies the empty list in a lexical type binding.
+
+For definitions and implementations, a generic header
+$H=\texttt{[}a_1,\ldots,a_n\ \texttt{where }P_1,\ldots,P_k\texttt{]}$
+has two effects. It wraps the value in type and implicit abstractions, and wraps a declared
+implementation type in the corresponding quantifiers and arrows:
+\[
+\begin{aligned}
+\mathcal G_H(E)
+ &=\Lambda a_1.\cdots\Lambda a_n.
+   \ilam{d_1}{\hat P_1}{\cdots\ilam{d_k}{\hat P_k}{E}},\\
+\mathcal Q_H(T)
+ &=\forall a_1.\cdots\forall a_n.
+   \hat P_1\Rightarrow\cdots\Rightarrow\hat P_k\Rightarrow T.
+\end{aligned}
+\]
+The $d_j$ are fresh binders with no source-accessible names.
+The type-parameter list may be empty, and the \texttt{where} clause is optional.
+An omitted header makes both constructions the identity.
+Constraints are separated by \texttt{and} or commas.
+Using the parameter construction $\mathcal L$ above, a definition translates as
+\[
+\begin{aligned}
+&\texttt{def }f\,H\,\texttt{(}\bar p\texttt{): R = e; b}\\
+&\qquad\longmapsto
+ \letin{f}{\mathcal G_H(\mathcal L_{\bar p}((\hat e:\hat R)))}{\hat b}.
+\end{aligned}
+\]
+The result annotation sits inside all the function's binders.
+The \texttt{where} constraints precede the explicitly written ordinary and implicit parameters.
+
+\begin{minipage}{\textwidth}
+Implementations have the following forms:
 \begin{lstlisting}
-trait ToString[A] = { toString: A -> String }
-
-impl ToString[String] {
-  toString = (text: String) => text
-}
-
-def display[A where ToString[A]](x: A): String = x.toString
-
-display[String]("Ada")
+impl Q = e; b
+impl name: Q = e; b
+impl [A where P]: Q = e; b
+impl name[A where P]: Q = e; b
 \end{lstlisting}
-A declaration sequence is a nested expression, not a module. The parser constructs the
-right-hand sides below directly; $b$ is the remainder of the sequence.
+All four translate to
 \[
-\begin{aligned}
-&\kw{trait}\ C[\bar\alpha]=A;\ b
- &&\equiv\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ b,\\[2pt]
-&\kw{type}\ C[\bar\alpha]=A;\ b
- &&\equiv\kw{type}\ C[\bar\alpha]=A\ \kw{in}\ b,\\[2pt]
-&\kw{val}\ x=e;\ b
- &&\equiv\letin{x}{e}{b},\\[2pt]
-&\kw{val}\ x:A=e;\ b
- &&\equiv\letin{x}{(e:A)}{b},\\[2pt]
-&\kw{impl}\ d:A=e;\ b
- &&\equiv\impl{d}{A}{e}{b}.
-\end{aligned}
+ \impl{d}{\mathcal Q_H(\hat Q)}{\mathcal G_H(\hat e)}{\hat b},
 \]
-For $\bar P=P_1,\ldots,P_k$ and fresh $d_1,\ldots,d_k$:
-\[
-\begin{aligned}
-&\kw{def}\ f[\bar\alpha\ \kw{where}\ \bar P](\bar x:\bar A):B=e;\ b\\
-&\quad\equiv
- \letin{f}{\Lambda\bar\alpha.\,
- \lambda\{d_1:P_1\}.\cdots\lambda\{d_k:P_k\}.
- \lambda(\bar x:\bar A).(e:B)}{b}.
-\end{aligned}
-\]
-\[
-\begin{aligned}
-&\kw{impl}\ i[\bar\alpha\ \kw{where}\ \bar P]:Q\ \{\bar\ell=\bar e\};\ b\\
-&\quad\equiv\impl{i}{\forall\bar\alpha.P_1\Rightarrow\cdots\Rightarrow P_k\Rightarrow Q}
- {\Lambda\bar\alpha.\lambda\{d_1:P_1\}.\cdots\lambda\{d_k:P_k\}.
- \{\bar\ell=\bar e\}}{b}.
-\end{aligned}
-\]
-An implementation body after \texttt{=} may be any expression. A record body without
-\texttt{=} is the same expression. Anonymous \texttt{impl Q \{...\}} introduces a fresh,
-unspellable binding name. Ordinary parameter lists are curried. The parser uses precedence
-$\mathsf{postfix}>\times>\{+,-\}>\mathbin{+\!+}>\{==,<,>\}$, with
-left-associative binary operators.
+where $d$ is the supplied name or a fresh source-inaccessible binder, and an absent $H$ is empty.
+The colon separates a name or header from the target type, so \texttt{impl C[A] = e}
+has target type \texttt{C[A]}. Every form requires \texttt{=}, followed by any expression.
+\end{minipage}
 
-\subsection*{Lexical type aliases and qualified references}
-A nonrecursive synonym $C[\bar\alpha]=B$ expands
-$C[\bar A]$ to $B[\bar A/\bar\alpha]$ in its lexical body. Expansion is
-capture avoiding: $B$ retains its declaration-time type-variable bindings.
-$|\bar A|=|\bar\alpha|$ is required. A term binding shadows an equally named synonym.
-If a name resolves to a synonym rather than a term binding:
+\begin{minipage}{\textwidth}
+For example, the definition
+\begin{lstlisting}
+def display[A where ToString[A]](x: A): String = x.toString
+rest
+\end{lstlisting}
+translates to
 \[
- C[\bar A]\text{ in term position}\quad\equiv\quad\need{C[\bar A]}.
+ \letin{\kw{display}}
+ {\Lambda A.\ilam{d}{\TS[A]}{\lam{x}{A}{(x.\kw{toString}:\Str)}}}
+ {\kw{rest}}.
 \]
-Thus \texttt{ToString[A].toString(x)} denotes a projection from a deferred
-implementation request. The core type is directly
-\[
-\TS[A]\triangleq\{\kw{toString}:A\to\Str\}.
-\]
-\subsection*{Judgments and implementation representation}
+Here $d$ is the generated constraint binder. The type name $\TS[A]$, selection
+$x.\kw{toString}$, and result ascription remain in the abstract expression for elaboration.
+\end{minipage}
+
+\subsection*{Grouping and the elaboration boundary}
+Precedence, from tightest to loosest, is adjacent postfix operations, application,
+\texttt{*}, \texttt{+}/\texttt{-}, \texttt{++}, comparisons, and ascription.
+Applications and binary operators associate to the left. Adjacency determines the argument
+tree: \texttt{f g(x)} parses as \texttt{f(g(x))}, while \texttt{f g (x)} parses as
+\texttt{f(g)(x)}. A negative argument is parenthesized, as in \texttt{f(-1)};
+\texttt{f - 1} is subtraction.
+
+A newline after a complete expression ends its application, selection, ascription, and
+operator chain, allowing it to separate a declaration initializer from its continuation.
+Line breaks are allowed where a component is still required, such as after \texttt{=}
+or \texttt{=>}. Record fields require commas, semicolons, or newlines, with an optional
+trailing separator. Comments are whitespace; newlines inside them also act as boundaries.
+
+The resulting expression records syntax and lexical nesting. Elaboration resolves term
+names against ordinary and implementation binders, resolves type names against type
+variables and synonyms, and checks annotations. It classifies each selection $e.\ell$
+using the receiver's type: an existing record field becomes a projection; otherwise the
+method rule may introduce an implementation request and apply its selected member to
+the receiver. For \texttt{P::field}, parsing has already made that request explicit as
+$(\need{\hat P}).\mathit{field}$. Types remain separate from term receivers:
+\texttt{ToString[A].toString} fails elaboration when \texttt{ToString} names only a type.
+Evidence resolution later supplies implementations for the resulting requests.
+
+\newpage
+\section{Typing and elaboration: functions and bindings}
+\subsection*{Judgments and name resolution}
 \[
 \boxed{\E e A c}\qquad
 \boxed{\R c t}\qquad
@@ -195,8 +334,12 @@ These are, respectively, name/type elaboration, evidence resolution, explicit-ta
 typing, and evaluation. The implementation uses separate de Bruijn indices for $\Gamma$
 and $\Delta$, and a type-variable depth. The final target has one term-index space.
 
-\newpage
-\section{Typing and elaboration: functions and bindings}
+A nonrecursive synonym $C[\bar\alpha]=B$ expands
+$C[\bar A]$ to $B[\bar A/\bar\alpha]$ in its lexical body. Expansion is
+capture avoiding: $B$ retains its declaration-time type-variable bindings.
+$|\bar A|=|\bar\alpha|$ is required. Types and values are resolved in their respective
+namespaces.
+
 All annotation types must satisfy $\wf A$. Instance selection does not occur in this judgment.
 \begin{mathpar}
 
@@ -298,7 +441,9 @@ Let $\operatorname{labels}(A)$ be the field labels when $A$ is a record, and $\v
 \end{mathpar}
 Zero candidates reject the selection; two distinct candidate types reject it as ambiguous.
 This rule determines the request type, not its implementation. Actual record projection
-has priority. Explicit qualification $\need P.\ell(e)$ avoids this receiver-syntax restriction.
+has priority; records without the requested field can also use this rule.
+Explicit qualification $\need P.\ell(e)$, written \texttt{P::member(e)} in source syntax,
+avoids this receiver-syntax restriction.
 
 \subsection*{The running qualified function}
 With $\TS[A]=\{\kw{toString}:A\to\Str\}$, the source definition
@@ -385,8 +530,8 @@ satisfies $\Pj p{\TS[\kw{Person}]}$. It is permitted as the result of a stronger
 but the exact-lookup placeholder does not discover it. The source program can construct
 and install it explicitly:
 \begin{lstlisting}
-impl person: ToString[Person] = via[Person, String]{personName}{string}
-ToString[Person].toString({ name = "Ada" })
+impl person: ToString[Person] = via[Person, String](using personName, using string)
+ToString[Person]::toString({ name = "Ada" })
 \end{lstlisting}
 There is no special type of implementation values: $i,r,s$ are ordinary values,
 and $\mathsf{impl}$ only changes which context binds them.

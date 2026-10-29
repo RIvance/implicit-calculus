@@ -19,7 +19,8 @@ enum Expr {
   case StringLit(value: String)
   case BoolLit(value: Boolean)
   case Record(fields: Vector[(String, Expr)])
-  case Proj(record: Expr, label: String)
+  /** Elaboration determines whether this selects a record field or applies an implicit method. */
+  case Select(receiver: Expr, label: String)
   case BinOp(kind: OpKind, left: Expr, right: Expr)
 }
 

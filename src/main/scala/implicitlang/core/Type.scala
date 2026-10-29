@@ -75,7 +75,7 @@ enum Type {
     case BoolType => "Bool"
     case Variable(index) => s"^$index"
     case Arrow(parameter, result) => s"(${parameter.show} -> ${result.show})"
-    case Implicit(parameter, result) => s"(${parameter.show} => ${result.show})"
+    case Implicit(parameter, result) => s"(${parameter.show} ~> ${result.show})"
     case Forall(body) => s"(forall. ${body.show})"
     case Record(fields) => fields.map { case (label, tpe) => s"$label: ${tpe.show}" }.mkString("{", ", ", "}")
   }
