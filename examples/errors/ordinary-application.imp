@@ -1,0 +1,7 @@
+// error: MissingInstance(StringType)
+
+instance number: Int = 21
+instance render: Int -> String = (number: Int) => "value"
+
+// The function is available as a value, but its ordinary parameter requires an explicit call.
+summon[String]

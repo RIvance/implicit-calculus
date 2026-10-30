@@ -890,10 +890,10 @@ object CalculusTests {
       assert(success(new SmtSynthesizer().synthesize(Type.IntType, context)) == ImplicitTerm.Instance(0))
     }
 
-    test("SMT synthesis composes ordinary and implicit producers") {
+    test("SMT synthesis composes implicit producers") {
       val source = """
         |instance text: String = "Ada"
-        |instance toNumber: String -> Int = (text: String) => 21
+        |instance toNumber: String ~> Int = (implicit text: String) => 21
         |instance toBool: Int ~> Bool = (implicit number: Int) => number > 0
         |summon[Bool]
         |""".stripMargin
@@ -928,23 +928,42 @@ object CalculusTests {
       assert(success(found) == ImplicitTerm.TypeApp(ImplicitTerm.Instance(0), polymorphic))
     }
 
-    test("SMT synthesis can apply a function exposed by an inferred type argument") {
+    test("SMT synthesis can apply an implicit function exposed by an inferred type argument") {
       val source = """
-        |(implicit produce: forall A. (A -> Int) -> A,
-        | implicit handler: (String -> Bool) -> Int,
+        |(implicit produce: forall A. (A -> Int) ~> A,
+        | implicit handler: (String ~> Bool) -> Int,
         | implicit text: String) => summon[Bool]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
       assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
     }
 
-    test("SMT synthesis can instantiate a universal exposed after value application") {
+    test("SMT synthesis can instantiate a universal exposed after implicit application") {
       val source = """
-        |(implicit produce: forall A. (A -> Int) -> A,
+        |(implicit produce: forall A. (A -> Int) ~> A,
         | implicit handler: (forall B. B -> B) -> Int) => summon[Int -> Int]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
       assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
+    }
+
+    test("SMT synthesis stops at ordinary arrows exposed during construction") {
+      val ordinary = Type.Arrow(Type.StringType, Type.BoolType)
+      val polymorphic = Type.Forall(Type.Implicit(Type.Arrow(Type.Variable(0), Type.IntType), Type.Variable(0)))
+      val cases = Vector(
+        (Type.IntType, List(Type.Forall(Type.Arrow(Type.Variable(0), Type.IntType)), Type.StringType), 4),
+        (Type.BoolType, List(polymorphic, Type.Arrow(ordinary, Type.IntType), Type.StringType), 6),
+        (Type.BoolType, List(
+          Type.Implicit(Type.StringType, Type.Arrow(Type.IntType, Type.BoolType)), Type.StringType, Type.IntType
+        ), 5)
+      )
+      cases.foreach { case (goal, instances, steps) =>
+        val synthesizer = new SmtSynthesizer(SynthesisLimits(maximumSteps = steps))
+        expectFailure(synthesizer.synthesize(goal, SynthesisContext(instances, 0))) {
+          case Error.SynthesisLimit(actual, limit, _) => actual == goal && limit == steps
+          case _ => false
+        }
+      }
     }
 
     test("SMT synthesis does not unify distinct rigid type variables") {
@@ -972,13 +991,13 @@ object CalculusTests {
     }
 
     test("SMT search limits are distinct from missing evidence") {
-      val context = SynthesisContext(List(Type.Arrow(Type.StringType, Type.IntType), Type.StringType), 0)
+      val context = SynthesisContext(List(Type.Implicit(Type.StringType, Type.IntType), Type.StringType), 0)
       expectFailure(new SmtSynthesizer(SynthesisLimits(maximumSteps = 2)).synthesize(Type.IntType, context)) {
         case Error.SynthesisLimit(Type.IntType, 2, _) => true
         case _ => false
       }
       assert(success(new SmtSynthesizer().synthesize(Type.IntType, context)) ==
-        ImplicitTerm.App(ImplicitTerm.Instance(0), ImplicitTerm.Instance(1)))
+        ImplicitTerm.ImplicitApp(ImplicitTerm.Instance(0), ImplicitTerm.Instance(1)))
     }
 
     test("SMT type-argument depth limits are explicit") {
@@ -994,7 +1013,7 @@ object CalculusTests {
 
     test("SMT queries preserve their caller's context across success and failure") {
       val synthesizer = new SmtSynthesizer()
-      val instances = List(Type.Arrow(Type.StringType, Type.IntType), Type.StringType)
+      val instances = List(Type.Implicit(Type.StringType, Type.IntType), Type.StringType)
       val context = SynthesisContext(instances, 0)
       val first = success(synthesizer.synthesize(Type.IntType, context))
       expectFailure(synthesizer.synthesize(Type.BoolType, context)) {
@@ -1028,7 +1047,7 @@ object CalculusTests {
     }
 
     test("baseline does not compose available implementations") {
-      val function = Type.Arrow(Type.StringType, Type.IntType)
+      val function = Type.Implicit(Type.StringType, Type.IntType)
       val context = SynthesisContext(List(function, Type.StringType), typeDepth = 0)
       expectFailure(new NaiveSynthesizer().synthesize(Type.IntType, context)) {
         case Error.MissingInstance(Type.IntType) => true
@@ -1045,17 +1064,54 @@ object CalculusTests {
     test("a replacement synthesizer can compose existing first-class values") {
       val composing = new Synthesizer {
         def synthesize(goal: Type, context: SynthesisContext): Result[ImplicitTerm, Error] = {
-          val function = context.instances.indexOf(Type.Arrow(Type.IntType, Type.IntType))
+          val function = context.instances.indexOf(Type.Implicit(Type.IntType, Type.IntType))
           val argument = context.instances.indexOf(Type.IntType)
           if goal == Type.IntType && function >= 0 && argument >= 0 then {
-            Result.Ok(ImplicitTerm.App(ImplicitTerm.Instance(function), ImplicitTerm.Instance(argument)))
+            Result.Ok(ImplicitTerm.ImplicitApp(ImplicitTerm.Instance(function), ImplicitTerm.Instance(argument)))
           } else {
             new NaiveSynthesizer().synthesize(goal, context)
           }
         }
       }
-      val source = "instance f: Int -> Int = (n: Int) => n + 1 in instance n: Int = 21 in summon[Int]"
+      val source = "instance f: Int ~> Int = (implicit n: Int) => n + 1 in instance n: Int = 21 in summon[Int]"
       assert(success(Pipeline.run(source, composing)) == Value.Integer(22))
+    }
+
+    test("the resolver rejects ordinary applications anywhere in synthesized evidence") {
+      val application = ImplicitTerm.App(ImplicitTerm.Instance(1), ImplicitTerm.Instance(2))
+      val constructions = Vector(application, ImplicitTerm.ImplicitApp(ImplicitTerm.Instance(0), application))
+      val source = """
+        |instance number: Int = 21
+        |instance render: Int -> String = (number: Int) => "value"
+        |instance wrap: String ~> String = (implicit text: String) => "(" ++ text ++ ")"
+        |summon[String]
+        |""".stripMargin
+      constructions.foreach { construction =>
+        val invalid = new Synthesizer {
+          def synthesize(goal: Type, context: SynthesisContext): Result[ImplicitTerm, Error] = Result.Ok(construction)
+        }
+        expectFailure(Pipeline.compile(source, invalid)) {
+          case Error.InvalidEvidenceForm(found) => found == application
+          case _ => false
+        }
+      }
+    }
+
+    test("implicit evidence application requires an implicit arrow before erasure") {
+      val invalid = new Synthesizer {
+        def synthesize(goal: Type, context: SynthesisContext): Result[ImplicitTerm, Error] = {
+          Result.Ok(ImplicitTerm.ImplicitApp(ImplicitTerm.Instance(0), ImplicitTerm.Instance(1)))
+        }
+      }
+      val source = """
+        |instance number: Int = 21
+        |instance render: Int -> String = (number: Int) => "value"
+        |summon[String]
+        |""".stripMargin
+      expectFailure(Pipeline.compile(source, invalid)) {
+        case Error.ExpectedImplicitFunction(Type.Arrow(Type.IntType, Type.StringType)) => true
+        case _ => false
+      }
     }
 
     test("the resolver rejects a synthesizer returning a term of the wrong type") {

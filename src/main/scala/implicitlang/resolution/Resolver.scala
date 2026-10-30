@@ -139,33 +139,19 @@ final class Resolver(synthesizer: Synthesizer) {
         }
       } yield result
     }
-    case ImplicitTerm.App(function, argument) => {
-      checkEvidenceApplication(function, argument, context, implicitArgument = false)
-    }
     case ImplicitTerm.ImplicitApp(function, argument) => {
-      checkEvidenceApplication(function, argument, context, implicitArgument = true)
+      // Γ; Δ ⊢ev p : A ⇒ B    Γ; Δ ⊢ev q : A  /  Γ; Δ ⊢ev p{q} : B   (P-Implicit-App)
+      for {
+        producer <- checkEvidence(function, context)
+        actual <- checkEvidence(argument, context)
+        signature <- producer.tpe match {
+          case Type.Implicit(parameter, result) => Result.Ok(parameter -> result)
+          case other => Result.Err(Error.ExpectedImplicitFunction(other))
+        }
+        _ <- if signature._1 == actual.tpe then Result.Ok(())
+          else Result.Err(Error.ExpectedType(signature._1, actual.tpe))
+      } yield Instance(signature._2, Term.App(producer.term, actual.term))
     }
     case other => Result.Err(Error.InvalidEvidenceForm(other))
   }
-
-  private def checkEvidenceApplication(
-    function: ImplicitTerm,
-    argument: ImplicitTerm,
-    context: Context,
-    implicitArgument: Boolean
-  ): Result[Instance, Error] = {
-    for {
-      producer <- checkEvidence(function, context)
-      actual <- checkEvidence(argument, context)
-      signature <- (implicitArgument, producer.tpe) match {
-        case (false, Type.Arrow(parameter, result)) => Result.Ok(parameter -> result)
-        case (true, Type.Implicit(parameter, result)) => Result.Ok(parameter -> result)
-        case (false, other) => Result.Err(Error.ExpectedFunction(other))
-        case (true, other) => Result.Err(Error.ExpectedImplicitFunction(other))
-      }
-      _ <- if signature._1 == actual.tpe then Result.Ok(())
-        else Result.Err(Error.ExpectedType(signature._1, actual.tpe))
-    } yield Instance(signature._2, Term.App(producer.term, actual.term))
-  }
-
 }

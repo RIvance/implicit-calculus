@@ -166,7 +166,6 @@ private[synthesis] final class SmtTypes(context: Context, labels: Vector[String]
   }
   defineOperations()
 
-  def explicit(parameter: TypeExpression, result: TypeExpression): TypeExpression = build(arrow, parameter, result)
   def implicitFunction(parameter: TypeExpression, result: TypeExpression): TypeExpression = {
     build(implicitArrow, parameter, result)
   }
@@ -194,7 +193,7 @@ private[synthesis] final class SmtTypes(context: Context, labels: Vector[String]
         else shift.apply(argument, context.mkInt(0), context.mkInt(depth))
       }
       case Type.Variable(index) => build(variable, context.mkInt(index - arguments.size))
-      case Type.Arrow(parameter, result) => explicit(loop(parameter, depth), loop(result, depth))
+      case Type.Arrow(parameter, result) => build(arrow, loop(parameter, depth), loop(result, depth))
       case Type.Implicit(parameter, result) => implicitFunction(loop(parameter, depth), loop(result, depth))
       case Type.Forall(body) => build(forall, loop(body, depth + 1))
       // Canonical serialization makes SMT datatype equality coincide with unordered map equality.

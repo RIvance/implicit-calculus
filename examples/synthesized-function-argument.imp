@@ -1,0 +1,7 @@
+// result: 21
+
+instance increment: Int -> Int = (value: Int) => value + 1
+instance answer(implicit operation: Int -> Int): Int = operation(20)
+
+// Search supplies the function to the implicit parameter; answer explicitly calls it.
+summon[Int]

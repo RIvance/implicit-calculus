@@ -1,0 +1,26 @@
+// result: {bytes = 6144, requests = 150}
+
+trait Combine[A] = {
+  combine: A -> A -> A
+}
+
+type Totals[A] = {
+  requests: A
+  bytes: A
+}
+
+implement Combine[Int] = {
+  combine = (a: Int, b: Int) => a + b
+}
+
+implement[A where Combine[A]] Combine[Totals[A]] = {
+  combine = (a: Totals[A], b: Totals[A]) => {
+    requests = Combine[A]::combine(a.requests, b.requests)
+    bytes = Combine[A]::combine(a.bytes, b.bytes)
+  }
+}
+
+let serverA: Totals[Int] = { requests = 100, bytes = 4096 }
+let serverB: Totals[Int] = { requests = 50, bytes = 2048 }
+
+Combine[Totals[Int]]::combine(serverA, serverB)

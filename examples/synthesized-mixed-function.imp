@@ -2,12 +2,12 @@
 
 type Counted[A] = { value: A, count: Int }
 
-instance text: String = "Ada"
 instance count: Int = 21
 instance counted[A](value: A, implicit count: Int): Counted[A] = {
   value = value
   count = count
 }
 
-// Synthesis infers A and supplies an ordinary argument followed by an implicit one.
-summon[Counted[String]]
+// Synthesis specializes the function; the caller supplies its value arguments.
+let countText = summon[String -> (Int ~> Counted[String])]
+countText("Ada", using summon[Int])

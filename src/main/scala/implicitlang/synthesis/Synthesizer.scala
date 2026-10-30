@@ -10,7 +10,7 @@ final case class SynthesisContext(instances: List[Type], typeDepth: Int)
 
 trait Synthesizer {
   /**
-   * Return a construction using only ImplicitTerm.Instance, TypeApp, App, and ImplicitApp.
+   * Return a construction using only ImplicitTerm.Instance, TypeApp, and ImplicitApp.
    * Instance indices refer to Δ, never Γ or the merged runtime environment.
    * The resolver checks this restricted grammar, the source type, and the explicit target type.
    */

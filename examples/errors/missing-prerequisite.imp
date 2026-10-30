@@ -1,6 +1,6 @@
 // error: MissingInstance(BoolType)
 
-instance positive: Int -> Bool = (number: Int) => number > 0
+instance positive: Int ~> Bool = (implicit number: Int) => number > 0
 
 // Calling the available producer still requires an Int implementation.
 summon[Bool]

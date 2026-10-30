@@ -1,7 +1,12 @@
 # Implicit implementation calculus
 
-A deliberately small, expression-based Scala 3 implementation of a two-context calculus.
-Surface traits describe record dictionaries. `implement` declares a top-level implementation;
+A research implementation of bounded SMT synthesis for implicit evidence in a two-context calculus.
+The synthesizer jointly chooses polymorphic type arguments and compositions of available values,
+using type instantiation and implicit application. The [formal specification](docs/calculus.pdf) develops
+the constraints, a worked satisfying model and its typing derivation, and the search's guarantees and bounds.
+
+The Scala 3 implementation includes a surface language whose traits describe record dictionaries.
+`implement` declares a top-level implementation;
 `instance` declares a named value for implicit search; `given` binds evidence within an expression.
 
 ## Run
@@ -268,7 +273,7 @@ distinct candidates are an error. This deliberately limited sugar handles `x.toS
 inside `display` without introducing a class registry or doing evidence search in elaboration.
 For a goal that needs more inference, write `ToString[A]::toString(x)` explicitly.
 
-## Replaceable synthesis
+## SMT-based evidence synthesis
 
 ```scala
 trait Synthesizer {
@@ -277,7 +282,7 @@ trait Synthesizer {
 ```
 
 The context provides ordered Δ types and the number of rigid type variables. A result is
-restricted to `ImplicitTerm.Instance`, `ImplicitTerm.TypeApp`, `ImplicitTerm.App`, and `ImplicitTerm.ImplicitApp`.
+restricted to `ImplicitTerm.Instance`, `ImplicitTerm.TypeApp`, and `ImplicitTerm.ImplicitApp`.
 It uses Δ indices, not the merged runtime indices. The resolver checks both this grammar
 and its source type **before** erasing implicit arrows, then checks the translated target.
 It rejects references to Γ, new lambdas/literals, unresolved goals, ill-scoped indices,
@@ -285,8 +290,9 @@ and explicit/implicit arrow mismatches. The result therefore composes available 
 implementations instead of inventing arbitrary terms of the desired type.
 
 `SmtSynthesizer` is the default. An exactly matching implementation still selects the nearest
-binding. Otherwise Z3 chooses type arguments and composes available values through explicit
-and implicit application. Type arguments may themselves contain functions, records, or
+binding. Otherwise Z3 chooses type arguments and composes available values through implicit
+application. Ordinary functions can be selected as values, including as implicit dependencies;
+their ordinary arguments must be supplied by program expressions. Type arguments may contain functions, records, or
 universals; in-scope type variables remain rigid. `examples/needs-smt.imp` now infers the
 hidden intermediate type `String` and evaluates to `Ada`.
 
@@ -302,8 +308,9 @@ between different solutions with the same chain count.
 `SynthesisUnknown` preserves Z3's reason, including timeout, and `SynthesisBackend` preserves
 a native/API failure's cause. Neither is reported as a missing instance. With an empty Δ,
 or after exhaustive search of the finite universal-free fragment, `MissingInstance` is a
-proven absence. The [formal specification](docs/calculus.pdf) gives the encoding, its bounds,
-and the independent validation contract. Each request owns and closes its native context.
+proven absence. The [formal specification, Section 5](docs/calculus.pdf) gives the encoding,
+its bounds, and the independent validation contract. Sections 5.4–5.5 work through a complete
+query, a satisfying model, and the resulting evidence derivation. Each request owns and closes its native context.
 
 `NaiveSynthesizer` remains available as an exact-lookup baseline for comparisons. It performs
 no instantiation or composition and is not a fallback for SMT failure.

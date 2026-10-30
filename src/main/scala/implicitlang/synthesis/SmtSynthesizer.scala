@@ -16,7 +16,7 @@ final case class SynthesisLimits(maximumSteps: Int = 16, maximumTypeDepth: Int =
 }
 
 /**
- * Bounded inhabitation of p ::= d | p[A] | p p | p{p}, using the official Z3 Java API.
+ * Bounded inhabitation of p ::= d | p[A] | p{p}.
  * A nearest exact Δ reference wins; otherwise any checked construction within the bounds may win.
  * Limits and solver unknown do not prove uninhabitability. Every request owns and closes its native
  * context; returned values contain only the calculus's immutable representation.
@@ -91,9 +91,8 @@ private final class EvidenceQuery(
     native.mkConstructor[Object](name, s"is_$name", Array(field), Array(sort), Array(0))
   }
   private val typeArgument = constructor("TypeArgument", "type_argument", types.sort)
-  private val explicitArgument = constructor("ExplicitArgument", "explicit_argument", native.getIntSort)
   private val implicitArgument = constructor("ImplicitArgument", "implicit_argument", native.getIntSort)
-  private val argumentSort = native.mkDatatypeSort("Argument", Array(typeArgument, explicitArgument, implicitArgument))
+  private val argumentSort = native.mkDatatypeSort("Argument", Array(typeArgument, implicitArgument))
   private type Argument = Expr[DatatypeSort[Object]]
   private final case class Spine(
     head: Expr[IntSort], length: Expr[IntSort], result: types.TypeExpression, arguments: Vector[Argument]
@@ -105,8 +104,8 @@ private final class EvidenceQuery(
   private def is(constructor: Constructor[Object], argument: Argument): BoolExpr = {
     constructor.getTesterDecl.apply(argument).asInstanceOf[BoolExpr]
   }
-  private def reference(constructor: Constructor[Object], argument: Argument): Expr[IntSort] = {
-    constructor.getAccessorDecls()(0).apply(argument).asInstanceOf[Expr[IntSort]]
+  private def reference(argument: Argument): Expr[IntSort] = {
+    implicitArgument.getAccessorDecls()(0).apply(argument).asInstanceOf[Expr[IntSort]]
   }
   private def typeValue(argument: Argument): types.TypeExpression = {
     typeArgument.getAccessorDecls()(0).apply(argument).asInstanceOf[types.TypeExpression]
@@ -142,14 +141,12 @@ private final class EvidenceQuery(
       inScope(spine.length, maximumSteps)
     )))
 
-    def valueArgument(
-      constructor: Constructor[Object], argument: Argument, expected: types.TypeExpression
-    ): BoolExpr = {
+    def valueArgument(argument: Argument, expected: types.TypeExpression): BoolExpr = {
       if previous.isEmpty then native.mkFalse()
       else {
-        val ref = reference(constructor, argument)
+        val ref = reference(argument)
         native.mkAnd(
-          is(constructor, argument), inScope(ref, previous.size), native.mkEq(lookup(ref, previous), expected)
+          is(implicitArgument, argument), inScope(ref, previous.size), native.mkEq(lookup(ref, previous), expected)
         )
       }
     }
@@ -171,31 +168,25 @@ private final class EvidenceQuery(
               solver.add(native.mkImplies(applied, is(typeArgument, argument)))
               continue(Known(body, typeValue(argument) +: bindings), step + 1)
             }
-            // Δ ⊢ p : A → B    Δ ⊢ q : A  /  Δ ⊢ p q : B               (P-App)
-            case Known(Type.Arrow(parameter, result), bindings) => {
-              solver.add(native.mkImplies(
-                applied, valueArgument(explicitArgument, argument, encoded(Known(parameter, bindings)))
-              ))
-              if previous.nonEmpty then continue(Known(result, bindings), step + 1)
-            }
             // Δ ⊢ p : A ⇒ B    Δ ⊢ q : A  /  Δ ⊢ p{q} : B               (P-Implicit-App)
             case Known(Type.Implicit(parameter, result), bindings) => {
               solver.add(native.mkImplies(
-                applied, valueArgument(implicitArgument, argument, encoded(Known(parameter, bindings)))
+                applied, valueArgument(argument, encoded(Known(parameter, bindings)))
               ))
               if previous.nonEmpty then continue(Known(result, bindings), step + 1)
             }
             case Known(_, _) => solver.add(native.mkNot(applied))
             case Inferred(value) => {
               val result = native.mkConst(s"inferred_${index}_${head}_$step", types.sort)
-              def application(constructor: Constructor[Object]): BoolExpr = {
+              val application = {
                 if previous.isEmpty then native.mkFalse()
                 else {
-                  val ref = reference(constructor, argument)
+                  val ref = reference(argument)
                   val parameter = lookup(ref, previous)
-                  val function = if constructor == implicitArgument then types.implicitFunction(parameter, result)
-                    else types.explicit(parameter, result)
-                  native.mkAnd(is(constructor, argument), inScope(ref, previous.size), native.mkEq(value, function))
+                  val function = types.implicitFunction(parameter, result)
+                  native.mkAnd(
+                    is(implicitArgument, argument), inScope(ref, previous.size), native.mkEq(value, function)
+                  )
                 }
               }
               solver.add(native.mkImplies(applied, native.mkOr(
@@ -203,7 +194,7 @@ private final class EvidenceQuery(
                   is(typeArgument, argument), types.polymorphic(value),
                   native.mkEq(result, types.instantiate(value, typeValue(argument)))
                 ),
-                application(explicitArgument), application(implicitArgument)
+                application
               )))
               continue(Inferred(result), step + 1)
             }
@@ -305,14 +296,12 @@ private final class EvidenceQuery(
       val declaration = value.getFuncDecl
       val operand = value.getArgs()(0)
       if declaration == typeArgument.ConstructorDecl() then ImplicitTerm.TypeApp(function, types.decode(operand))
-      else {
+      else if declaration == implicitArgument.ConstructorDecl() then {
         val earlier = integer(operand)
         require(earlier >= 0 && earlier < index, "Z3 evidence is not an acyclic construction")
         val evidence = decode(model, spines, earlier)
-        if declaration == explicitArgument.ConstructorDecl() then ImplicitTerm.App(function, evidence)
-        else if declaration == implicitArgument.ConstructorDecl() then ImplicitTerm.ImplicitApp(function, evidence)
-        else throw new IllegalStateException("Z3 returned a value outside the evidence datatype")
-      }
+        ImplicitTerm.ImplicitApp(function, evidence)
+      } else throw new IllegalStateException("Z3 returned a value outside the evidence datatype")
     }
   }
 }

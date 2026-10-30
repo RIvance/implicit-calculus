@@ -8,7 +8,7 @@
 \definecolor{ink}{HTML}{263849}
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small A Minimal Calculus of Implicit Implementations}
+\fancyhead[L]{\small SMT Synthesis of Implicit Implementations}
 \fancyhead[R]{\small Formal specification}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
@@ -40,8 +40,14 @@
 \newcommand{\fields}[1]{\{#1\}}
 \newcommand{\traittype}[1]{[\![#1]\!]}
 \begin{document}
-{\Large\bfseries\color{ink} A Minimal Calculus of Implicit Implementations}\par
-{\small Scala 3 reference model \hfill 30 October 2026}
+{\Large\bfseries\color{ink} SMT Synthesis of Implicit Implementations}\par
+{\small Calculus and formal specification \hfill 30 October 2026}
+
+The central problem is to construct typed evidence by composing available values,
+choosing polymorphic type arguments and implicit applications together.
+Section~\ref{sec:smt} formulates this search as bounded SMT satisfiability and develops
+a complete example from constraints to a model and its typing derivation. The calculus
+specifies which constructions are admissible and how their evidence enters a program.
 
 \section{Types, expressions, and contexts}
 \[
@@ -646,10 +652,17 @@ The request is solved in the \emph{caller's} lexical environment, while requests
 an ordinary function body are solved in that body's definition environment.
 
 \newpage
-\section{Admissible evidence and the synthesizer}
+\section{SMT-based implicit synthesis}
+\label{sec:smt}
+Given a well-formed goal type $A$ and available implementations $\Delta$, synthesis
+seeks a construction $p$ such that $\Pj p A$. The search must choose both the
+composition of implementations and the types at which polymorphic values are used.
+An SMT model records those choices; decoding turns them into evidence for the goal.
+
+\subsection{Admissible evidence}
 Evidence constructions are a restricted subset of implicit terms:
 \[
-\boxed{p::=d\mid p[A]\mid p\,p\mid p\{p\}.}
+\boxed{p::=d\mid p[A]\mid p\{p\}.}
 \]
 The only leaves are references into $\Delta$. New literals, lambdas, projections,
 ordinary references from $\Gamma$, and unresolved requests are not synthesis results.
@@ -664,10 +677,6 @@ They may occur inside a previously checked first-class value installed in $\Delt
  {\Pj{p[B]}{A[B/\alpha]}}
 
 
-\inferrule*[right=P-App]{\Pj{p_1}{A\to B}\\\Pj{p_2}A}
- {\Pj{p_1\,p_2}B}
-
-
 \inferrule*[right=P-Implicit-App]{\Pj{p_1}{A\Rightarrow B}\\\Pj{p_2}A}
  {\Pj{p_1\{p_2\}}B}
 \end{mathpar}
@@ -680,8 +689,11 @@ The resolver rechecks $\Pj p A$ before lowering. The source arrow kind is checke
 erasure, even if two candidate types would erase to the same ordinary function type.
 Search uses $\Gamma$ only for its rigid type variables; its ordinary term bindings
 do not supply evidence.
+An ordinary function may be a goal or an implicit dependency. Its $\to$ parameters
+are supplied by explicit program expressions; synthesis eliminates only $\forall$
+and $\Rightarrow$.
 
-\subsection*{Exact-lookup baseline}
+\textbf{Exact lookup.}
 Let $\Delta=[d_0:A_0,\ldots,d_{m-1}:A_{m-1}]$, nearest binding first.
 \begin{mathpar}
 
@@ -692,14 +704,15 @@ If no $j$ satisfies the premises, the baseline fails. It does not instantiate a
 universal type, apply a producer, recurse, or search for a hidden type argument.
 Failure is not an uninhabitability result.
 
-\subsection*{Bounded SMT synthesis}
+\newpage
+\subsection{Bounded evidence programs}
 The default synthesizer first uses S-Exact. Otherwise it searches application
 \emph{spines}: a head reference followed by a sequence of eliminations. For bounds
 $N,H>0$, a candidate program is
 \[
 \begin{array}{rcl}
  z_i&=&d_{j_i}\,a_{i,1}\cdots a_{i,\ell_i}\qquad(0\le i\le r<N),\\
- a_{i,t}&::=&[B]\mid z_k\mid\{z_k\}\qquad(0\le k<i),\\
+ a_{i,t}&::=&[B]\mid\{z_k\}\qquad(0\le k<i),\\
  \displaystyle\sum_{i=0}^{r}(1+\ell_i)&\le&N.
 \end{array}
 \]
@@ -715,30 +728,32 @@ constraints, writing $U_k=T_{k,\ell_k}$ for a completed earlier spine:
 \begin{array}{c|l|l}
 a_{i,t}&\text{premises}&T_{i,t}\\ \hline
 [B]&T_{i,t-1}=\forall\alpha.C,\quad\wf B,\quad h(B)\le H&C[B/\alpha]\\
-z_k&T_{i,t-1}=U_k\to C&C\\
 \{z_k\}&T_{i,t-1}=U_k\Rightarrow C&C
 \end{array}
 \]
 Here $h$ is constructor height: base types and variables have height one,
 arrows and universals add one to their children's maximum height, and a record
 has height one plus its deepest field type (the empty record has height one).
-The final constraint is $U_r=A$, the requested type. Both kinds of arrow remain
-distinct throughout this search.
+The final constraint is $U_r=A$, the requested type. An ordinary arrow ends a spine;
+the resulting function value may satisfy the goal or an implicit argument of another spine.
 
 The solver considers increasing numbers of spines, up to $N$, with the same total
 cost bound. A successful result need not minimize cost or select a unique proof
 among solutions with the same number of spines. Only the initial nearest-exact
 preference is a lexical priority rule; no general coherence property is claimed.
-The implementation defaults to $N=16$, $H=8$, and a ten-second search timeout.
-These limits are configurable and do not restrict explicit evidence written by the programmer.
+The default structural bounds are $N=16$ and $H=8$.
+They bound the search, not the evidence typing judgment.
 
-\textbf{Type encoding.} Types are algebraic datatypes in SMT. At this encoding boundary,
+\subsection{Symbolic types and instantiation}
+Types are algebraic datatypes in SMT. At this encoding boundary,
 each unordered field map is serialized in increasing label order, so datatype equality
-coincides with map equality; decoding reconstructs an unordered map. Existing type variables are rigid de Bruijn indices, not unification
-metavariables; inferred type arguments are symbolic values of the type datatype.
+coincides with map equality; decoding reconstructs an unordered map. Existing type variables
+are rigid de Bruijn indices, not unification metavariables; inferred type arguments are
+symbolic values of the type datatype.
 At ambient depth $q$, well-formedness requires $0\le i<q$ for a variable
 $\underline i$ and increases $q$ beneath $\forall$. The serialized labels must be distinct
-and increasing; ordering is an encoding invariant, not a property of calculus records. Type arguments may contain nested universals as well as either arrow.
+and increasing; ordering is an encoding invariant, not a property of calculus records.
+Type arguments may contain nested universals as well as either arrow.
 
 Instantiation removes one binder and avoids capture. If $I_k(C,B)$ substitutes
 for the binder beneath $k$ retained universals, its variable and universal cases are
@@ -764,11 +779,146 @@ leaves the input types unchanged, commutes with substitution and every evidence
 typing rule, and never increases type height or program cost. It introduces no
 new record values or projections into evidence.
 
-\textbf{Constraint construction and validation.} A known implementation type
+\newpage
+\subsection{A worked SMT query}
+\label{sec:smt-example}
+Consider combining request and byte totals collected by different servers. Let
+$\Gamma=\cdot$ and abbreviate the following structural record types:
+\[
+\begin{aligned}
+ T(A)&\coloneqq\{\kw{requests}:A,\ \kw{bytes}:A\},\\
+ D(A)&\coloneqq\{\kw{combine}:A\to A\to A\}.
+\end{aligned}
+\]
+A dictionary of type $D(A)$ combines two values of type $A$. An integer dictionary
+can add counts; a polymorphic implementation combines records field by field using
+the supplied dictionary. The available values and goal are
+\[
+ \Delta=[\,c:\forall A.\,D(A)\Rightarrow D(T(A)),\quad d:D(\Int)\,],
+ \qquad G=D(T(\Int)).
+\]
+The value $c$ takes a type argument and an implicit dictionary. The server totals
+are ordinary program data, supplied later to the resulting dictionary's method.
+
+Take $N=16$ and $H=8$. No head in $\Delta$ has type $G$, so exact lookup fails.
+Consider the query with two spines $z_0,z_1$, with $z_1$ as the result.
+For each $i\in\{0,1\}$ the unknowns are
+\[
+\begin{array}{c|l}
+ \text{unknown}&\text{meaning}\\\hline
+ h_i\in\{c,d\}&\text{head chosen from }\Delta\\
+ \ell_i\in\mathbb Z&\text{number of eliminations after the head}\\
+ U_i, B_i\in\mathsf{Type}&\text{result type and, when used, the type argument to }c\\
+ k_i\in\mathbb Z&\text{reference for the implicit argument to }c
+\end{array}
+\]
+The $h_i$ are finite choices, the lengths and references are integer unknowns,
+and $U_i,B_i$ are symbolic types. A type argument or reference is relevant only
+when its elimination occurs. Each type application counts as one elimination.
+
+\textbf{Heads, lengths, and result types.}
+For every $i$, require $0\le\ell_i\le2$ and
+\[
+ h_i=d\ \Longrightarrow\ (\ell_i=0\land U_i=D(\Int)).
+\]
+For $h_i=c$, the length determines the result type. Each row imposes
+$(h_i=c\land\ell_i=j)\Longrightarrow U_i=R$ with the displayed $j,R$:
+\[
+\begin{array}{c|l|l}
+ j&\text{corresponding construction}&R\\\hline
+ 0&c&\forall A.\,D(A)\Rightarrow D(T(A))\\
+ 1&c[B_i]&D(B_i)\Rightarrow D(T(B_i))\\
+ 2&c[B_i]\{z_{k_i}\}&D(T(B_i))
+\end{array}
+\]
+These cases exhaust the possible eliminations: $d$ is a record, and the fully
+applied $c$ also produces a record.
+
+\textbf{Type arguments and dependencies.}
+Write $\mathsf{Valid}_8(B)$ for
+\[
+ (\cdot\vdash B\;\kw{type})\ \land\ h(B)\le8\ \land\
+ \mathsf{labels}(B)\subseteq\{\kw{combine},\kw{requests},\kw{bytes}\}.
+\]
+Here $\mathsf{labels}(B)$ collects record labels at every depth. Since $\Gamma$ is
+empty, $B$ must be closed; it may still contain bound variables under universals.
+For each $i$, require
+\[
+\begin{aligned}
+ h_i=c\land\ell_i\ge1&\ \Longrightarrow\ \mathsf{Valid}_8(B_i),\\
+ h_i=c\land\ell_i=2&\ \Longrightarrow\ (0\le k_i<i\land U_{k_i}=D(B_i)).
+\end{aligned}
+\]
+A symbolic subscript $U_{k_i}$ selects an earlier result type. At $i=1$, the
+dependency condition reduces to $k_1=0\land U_0=D(B_1)$. At $i=0$ no earlier
+reference exists, so implicit application is impossible.
+
+\textbf{Goal and cost.}
+Finally impose
+\[
+ \boxed{U_1=D(T(\Int))\qquad\land\qquad (1+\ell_0)+(1+\ell_1)\le16.}
+\]
+Let $\Phi_2$ be the conjunction of the domains and constraints above. The SMT question is
+whether there exist $\bar h,\bar\ell,\bar U,\bar B,\bar k$ satisfying $\Phi_2$.
+Both the construction and its type argument are unknown when this question is posed.
+
+\newpage
+\subsection{A satisfying model and its evidence}
+One satisfying assignment to the used variables is
+\[
+\begin{array}{c|c|c|c|c|l}
+ i&h_i&\ell_i&B_i&k_i&U_i\\\hline
+ 0&d&0&\text{--}&\text{--}&D(\Int)\\
+ 1&c&2&\Int&0&D(T(\Int))
+\end{array}
+\]
+A dash denotes an unused variable, whose value does not affect the construction.
+The type argument is closed, has height one, and contains no record labels.
+The implicit argument refers to $z_0:D(\Int)$, which precedes $z_1$. The cost is
+\[
+ (1+0)+(1+2)=4\le16.
+\]
+Decoding the model gives
+\[
+ z_0=d,\qquad z_1=c[\Int]\{z_0\},\qquad \boxed{p=c[\Int]\{d\}.}
+\]
+Its typing derivation follows the two eliminations. With $\Gamma=\cdot$, write
+$\Delta\vdash_{\mathrm{ev}}$ for $\Gamma;\Delta\vdash_{\mathrm{ev}}$:
+\begin{mathpar}
+\inferrule*[right=P-Type-App]
+ {\Delta\vdash_{\mathrm{ev}}c:\forall A.\,D(A)\Rightarrow D(T(A))\\
+  \cdot\vdash\Int\;\kw{type}}
+ {\Delta\vdash_{\mathrm{ev}}c[\Int]:D(\Int)\Rightarrow D(T(\Int))}
+
+\inferrule*[right=P-Implicit-App]
+ {\Delta\vdash_{\mathrm{ev}}c[\Int]:D(\Int)\Rightarrow D(T(\Int))\\
+  \Delta\vdash_{\mathrm{ev}}d:D(\Int)}
+ {\Delta\vdash_{\mathrm{ev}}c[\Int]\{d\}:D(T(\Int))}
+\end{mathpar}
+The leaf judgments follow from P-Instance. Thus the model describes an admissible
+composition with exactly the requested type.
+
+\textbf{How the constraints force the choices.}
+The goal differs from $D(\Int)$, and its record constructor excludes the universal
+and implicit-function results. Hence $h_1=c$ and $\ell_1=2$.
+The resulting equality $D(T(B_1))=D(T(\Int))$ forces $B_1=\Int$ by structural
+equality. The dependency must then have type $D(\Int)$, supplied by $d$.
+One spine cannot solve this goal because $c$ requires an earlier dictionary;
+two are sufficient.
+
+This illustrates the role of SMT: the goal equality constrains a type argument,
+the instantiated implicit arrow constrains the dictionary choice, and the reference
+inequality makes the evidence acyclic. If ordinary program variables $a,b:T(\Int)$
+hold server totals, the caller can use $(c[\Int]\{d\}).\kw{combine}\;a\;b$.
+Those ordinary applications consume the synthesized dictionary and the caller's data.
+
+\newpage
+\subsection{Model refinement and correctness}
+\textbf{Equivalent constraint simplification.} A known implementation type
 determines its initial sequence of eliminations. Interpreting that known structure
 with symbolic type arguments avoids asking SMT to rediscover it. When an inferred
 type becomes the function type, its constructor and the next elimination remain
-symbolic, including possible value application followed by type application.
+symbolic, including possible implicit application followed by type application.
 This is partial evaluation of the same constraints, not a separate matching algorithm.
 When no earlier spine exists, value application is impossible and its continuation
 is omitted.
@@ -777,22 +927,24 @@ Well-formedness and height constraints are enforced by model refinement. An init
 model is provisional. Every active type-argument position is checked; for each
 violation, the solver receives the general constraint that this position must be
 well formed and within height $H$ whenever it is active. Search then resumes with
-the same spine count. Every added constraint is required by P-Type-App and excludes
-no valid witness. Each position can require this refinement at most once. Evidence
-is decoded only after all these obligations hold. Native solver state belongs to
-one request and is discarded after success or failure.
+the same spine count. Every added constraint is part of the bounded formulation and
+excludes no witness within its bounds. Each position can require this refinement at most once. Evidence
+is decoded only after all these obligations hold. The worked query includes these
+obligations explicitly as the guarded $\mathsf{Valid}_8$ constraints.
 
-\textbf{Guarantees and failures.} Induction over the spine order, followed by its
+\textbf{Soundness and bounded completeness.} Induction over the spine order, followed by its
 eliminations, derives $\Pj p A$ for a satisfying, validated model. Conversely, flattening
 each function position in an admissible evidence tree and ordering its argument
-subtrees before their uses yields such a program. Therefore every witness whose
-program cost and type-argument heights meet the bounds is represented by the
-constraints. Solver timeouts or an \emph{unknown} answer may still prevent discovery.
+subtrees before their uses yields such a program. Together with the label restriction
+argument, this preserves existence of witnesses whose spine representations meet
+the cost and type-argument height bounds. Completeness is relative to these bounds;
+solver timeouts or an \emph{unknown} answer may still prevent discovery.
 The resolver independently rechecks the decoded construction and its erased target;
 an SMT model is not a trusted typing derivation.
 
-An unsatisfiable bounded query normally reports \emph{search limit exhausted}, not
-uninhabitability. There are two definite absence cases. Empty $\Delta$ admits no
+\textbf{Interpreting failure.} If every permitted spine count gives an unsatisfiable
+query, the result normally means \emph{search limit exhausted}, not uninhabitability.
+There are two definite absence cases. Empty $\Delta$ admits no
 evidence leaves. Also, if neither the goal nor any type in $\Delta$ contains $\forall$,
 let $k$ be the number of distinct subtypes of those inputs. Elimination can only
 produce these types. Choose a least-height proof for each inhabited type; its
@@ -800,9 +952,9 @@ dependencies have strictly smaller least heights. There are at most $k$ such
 proofs, and each head spine has at most $k$ nodes. A program of cost at most $k^2$
 therefore suffices whenever any proof exists. Unsatisfiability after covering that
 bound establishes absence. Otherwise exhaustion, solver unknown (including timeout),
-and native/API failures remain distinct outcomes, with the underlying reason preserved.
+and solver failure remain distinct outcomes.
 
-\subsection*{First-class polymorphic implementations}
+\textbf{An intermediate type absent from the goal.}
 A type abstraction can provide an implementation of type
 \[
  i:\forall A,B.\kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
@@ -812,16 +964,11 @@ Given $r:\kw{Repr}[\kw{Person},\Str]$ and $s:\TS[\Str]$ in $\Delta$, the constru
 \[
  p=i[\kw{Person}][\Str]\{r\}\{s\}
 \]
-satisfies $\Pj p{\TS[\kw{Person}]}$. The SMT synthesizer discovers the intermediate type
-$B=\Str$ and this composition; the exact-lookup baseline does not. The source program
-can also construct and install it explicitly:
-\begin{lstlisting}
-instance person: { toString: Person -> String } =
-  via[Person, String](using personName, using string)
-ToString[Person]::toString({ name = "Ada" })
-\end{lstlisting}
-There is no special type of implementation values: $i,r,s$ are ordinary values,
-and $\mathsf{impl}$ only changes which context binds them.
+satisfies $\Pj p{\TS[\kw{Person}]}$. Here $\TS[A]$ abbreviates the structural dictionary
+$\{\kw{toString}:A\to\Str\}$. Unlike $B_1$ in the worked query, the intermediate type
+$B$ does not occur in the goal: matching the available argument $r$ forces $B=\Str$,
+which in turn makes $s$ a suitable second argument. The SMT constraints express
+these coupled choices even when exact lookup cannot supply the goal directly.
 
 \newpage
 \section{Resolution and lowering}
@@ -834,8 +981,8 @@ and $\mathsf{impl}$ only changes which context binds them.
 \erase{\{\ell_j:A_j\}_{j\in J}}&=\{\ell_j:\erase{A_j}\}_{j\in J}.
 \end{aligned}
 \]
-For evidence, $\erase d=d$, $\erase{p[A]}=\erase p[\erase A]$, and both evidence
-application forms erase to ordinary application. Ordinary and instance names are
+For evidence, $\erase d=d$, $\erase{p[A]}=\erase p[\erase A]$, and
+$\erase{p\{q\}}=\erase p\,\erase q$. Ordinary and instance names are
 embedded in one target namespace; freshness prevents capture.
 
 \begin{mathpar}
