@@ -179,7 +179,7 @@ object CalculusTests {
       val program = parse("type Number = Int in x => x")
       val expected = Type.Arrow(Type.IntType, Type.IntType)
       val checked = success(new Elaborator().elaborate(program, Some(expected)))
-      assert(checked == Elaborated(ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Var(0)), expected))
+      assert(checked == Elaborated(ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Var(0), Some("x")), expected))
       expectFailure(new Elaborator().elaborate(program, Some(Type.Arrow(Type.Variable(0), Type.Variable(0))))) {
         case Error.InvalidTypeIndex(0, 0) => true
         case _ => false
@@ -200,7 +200,7 @@ object CalculusTests {
         "(a: Int) => (implicit b: String) => (c: Bool) => b"
       ).foreach(source => assert(expression(source) == expected))
       val compilation = success(Pipeline.compile("(a: Int, implicit b: String, c: Bool) => b"))
-      assert(compilation.core.tpe == Type.Arrow(
+      assert(compilation.elaborated.tpe == Type.Arrow(
         Type.IntType,
         Type.Implicit(Type.StringType, Type.Arrow(Type.BoolType, Type.StringType))
       ))
@@ -240,7 +240,7 @@ object CalculusTests {
 
     test("a trailing implicit parameter remains a first-class implicit function") {
       val source = "let f = (a: Int, implicit b: Int) => a + b in f(1)"
-      assert(success(Pipeline.compile(source)).core.tpe == Type.Implicit(Type.IntType, Type.IntType))
+      assert(success(Pipeline.compile(source)).elaborated.tpe == Type.Implicit(Type.IntType, Type.IntType))
       assert(run(s"($source)(using 20)") == Value.Integer(21))
       assert(run("def identity(implicit x: Int): Int = x in identity(using 21)") == Value.Integer(21))
     }
@@ -406,10 +406,10 @@ object CalculusTests {
 
     test("typed lets parse as ascribed initializers and elaborate identically") {
       val ast = expression("let a = (21: Int) in a")
-      val expected = success(Pipeline.compile("let a: Int = 21 in a")).core
+      val expected = success(Pipeline.compile("let a: Int = 21 in a")).elaborated
       Vector("let a: Int = 21 in a", "let a = (21: Int) in a", "let a: Int = 21\na").foreach { source =>
         assert(expression(source) == ast)
-        assert(success(Pipeline.compile(source)).core == expected)
+        assert(success(Pipeline.compile(source)).elaborated == expected)
         assert(run(source) == Value.Integer(21))
       }
       expectFailure(Pipeline.compile("let a: String = 21\na")) {
@@ -647,7 +647,8 @@ object CalculusTests {
       assert(actual == ImplicitTerm.Impl(
         Type.IntType,
         ImplicitTerm.IntLit(21),
-        ImplicitTerm.Lam(Type.StringType, ImplicitTerm.Instance(0))
+        ImplicitTerm.Lam(Type.StringType, ImplicitTerm.Instance(0), Some("x")),
+        Some("d")
       ))
     }
 
@@ -772,7 +773,7 @@ object CalculusTests {
 
     test("a bare implicit value is not forced merely by variable lookup") {
       val compilation = success(Pipeline.compile("(implicit x: Int) => x"))
-      assert(compilation.core.tpe == Type.Implicit(Type.IntType, Type.IntType))
+      assert(compilation.elaborated.tpe == Type.Implicit(Type.IntType, Type.IntType))
       assert(success(TypeChecker.infer(compilation.target)) == Type.Arrow(Type.IntType, Type.IntType))
     }
 
@@ -935,7 +936,7 @@ object CalculusTests {
         | implicit text: String) => summon[Bool]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
-      assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
+      assert(success(TypeChecker.infer(compilation.target)) == compilation.elaborated.tpe.erased)
     }
 
     test("SMT synthesis can instantiate a universal exposed after implicit application") {
@@ -944,7 +945,7 @@ object CalculusTests {
         | implicit handler: (forall B. B -> B) -> Int) => summon[Int -> Int]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
-      assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
+      assert(success(TypeChecker.infer(compilation.target)) == compilation.elaborated.tpe.erased)
     }
 
     test("SMT synthesis stops at ordinary arrows exposed during construction") {
@@ -1255,7 +1256,7 @@ object CalculusTests {
 
     test("resolution independently checks the result against its claimed core type") {
       val invalid = Elaborated(ImplicitTerm.IntLit(21), Type.BoolType)
-      assert(new implicitlang.resolution.Resolver(new NaiveSynthesizer()).resolve(invalid) ==
+      assert(new implicitlang.resolution.Resolver().resolve(invalid).run(new NaiveSynthesizer()).result ==
         Result.Err(Error.ExpectedType(Type.BoolType, Type.IntType)))
     }
 
@@ -1339,7 +1340,8 @@ object CalculusTests {
       val method = success(new Elaborator().elaborate(parse("(implicit methods: { inc: Int -> Int }) => 21.inc")))
       assert(method.expression == ImplicitTerm.ImplicitLam(
         methodType,
-        ImplicitTerm.App(ImplicitTerm.Proj(ImplicitTerm.Need(methodType), "inc"), ImplicitTerm.IntLit(21))
+        ImplicitTerm.App(ImplicitTerm.Proj(ImplicitTerm.Need(methodType), "inc"), ImplicitTerm.IntLit(21)),
+        Some("methods")
       ))
       val qualified = "type C = { inc: Int -> Int } in C::inc"
       val selected = success(new Elaborator().elaborate(parse(qualified)))
@@ -1594,8 +1596,8 @@ object CalculusTests {
       assert(parse(first) == parse(second))
       val left = success(Pipeline.compile(first))
       val right = success(Pipeline.compile(second))
-      assert(left.core == right.core && left.target == right.target)
-      assert(left.core.hashCode == right.core.hashCode)
+      assert(left.elaborated == right.elaborated && left.target == right.target)
+      assert(left.elaborated.hashCode == right.elaborated.hashCode)
       assert(run(first) == run(second))
       Vector("type R = { x: Int, x: Bool } in 0", "trait R = { x: Int, x: Int } in 0").foreach { source =>
         expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
@@ -1726,9 +1728,9 @@ object CalculusTests {
       val source = "def run(step: (Int -> Int) -> Int): Int = " +
         "step((value: Int) => run((ignored: Int -> Int) => value)) in run"
       val compilation = success(Pipeline.compile(source))
-      compilation.core.expression match {
-        case ImplicitTerm.Let(annotation, ImplicitTerm.Fix(recursiveType, _), ImplicitTerm.Var(0)) => {
-          assert(annotation == recursiveType && annotation == compilation.core.tpe)
+      compilation.elaborated.expression match {
+        case ImplicitTerm.Let(annotation, ImplicitTerm.Fix(recursiveType, _, _), ImplicitTerm.Var(0), _) => {
+          assert(annotation == recursiveType && annotation == compilation.elaborated.tpe)
         }
         case other => throw new AssertionError(s"Expected a recursive definition: $other")
       }
@@ -1741,9 +1743,9 @@ object CalculusTests {
         "def r: { l: Int } = { l = 21 } in r.l",
         "def f(x: Int): Int = x in f(21)"
       ).foreach { source =>
-        success(Pipeline.compile(source)).core.expression match {
-          case ImplicitTerm.Let(_, ImplicitTerm.Fix(_, _), _) => throw new AssertionError("Unexpected fixpoint")
-          case ImplicitTerm.Let(_, _, _) => ()
+        success(Pipeline.compile(source)).elaborated.expression match {
+          case ImplicitTerm.Let(_, ImplicitTerm.Fix(_, _, _), _, _) => throw new AssertionError("Unexpected fixpoint")
+          case ImplicitTerm.Let(_, _, _, _) => ()
           case other => throw new AssertionError(s"Expected a definition binding: $other")
         }
         assert(run(source) == Value.Integer(21))
@@ -1850,7 +1852,7 @@ object CalculusTests {
         }
       }
       expectFailure(Pipeline.compile("summon[Int]", invalid)) {
-        case Error.InvalidEvidenceForm(ImplicitTerm.Fix(_, _)) => true
+        case Error.InvalidEvidenceForm(ImplicitTerm.Fix(_, _, _)) => true
         case _ => false
       }
     }
@@ -1896,6 +1898,88 @@ object CalculusTests {
       assert(Term.Fix(Type.IntType, Term.Var(1)).instantiate(Term.Var(0)) == Term.Fix(Type.IntType, Term.Var(1)))
       assert(Term.Record(Map("bound" -> Term.Var(0), "outer" -> Term.Var(1))).instantiate(Term.IntLit(21)) ==
         Term.Record(Map("bound" -> Term.IntLit(21), "outer" -> Term.Var(0))))
+    }
+
+    test("implicit names preserve spelling and freshen shadowed binders without changing core identity") {
+      import implicitlang.`implicit`.ImplicitPrinter
+      val first = success(Pipeline.compile("(x: Int) => (x: Int) => x"))
+      val renamed = success(Pipeline.compile("(outer: Int) => (inner: Int) => inner"))
+      assert(first.target == renamed.target)
+      val nested = ImplicitTerm.Lam(
+        Type.IntType, ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Var(1), Some("x")), Some("x")
+      )
+      assert(ImplicitPrinter.term(nested) == "λ(x: Int). λ(x1: Int). x")
+      val mixed = ImplicitTerm.ImplicitLam(
+        Type.IntType, ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Instance(0), Some("value")), Some("value")
+      )
+      assert(ImplicitPrinter.term(mixed) == "λ{value: Int}. λ(value1: Int). value")
+      val abstracted = success(Compiler.prepare("def id[A](value: A): A = value in id"))
+      val rendered = ImplicitPrinter.term(abstracted.elaborated.expression)
+      assert(rendered.contains("let id:") && rendered.contains("ΛA. λ(value: A). value"))
+    }
+
+    test("resolution reports retain lexical names and completed goals when a later goal fails") {
+      val prepared = success(Compiler.prepare(
+        "instance seed: Int = 21 in let saved = summon[Int] in summon[String]"
+      ))
+      val report = prepared.resolve.run(new SmtSynthesizer())
+      assert(report.goals.size == 2)
+      assert(report.goals.head.request.names.instances == List("seed"))
+      assert(report.goals(1).request.names.ordinary == List("saved"))
+      assert(report.goals.head.validation == Result.Ok(()))
+      assert(report.goals(1).validation == Result.Err(Error.MissingInstance(Type.StringType)))
+      expectFailure(report.result) {
+        case Error.MissingInstance(Type.StringType) => true
+        case _ => false
+      }
+      val shadowed = success(Compiler.prepare("instance item: Int = 1 in given item: Int = 2 in summon[Int]"))
+        .resolve.run(new SmtSynthesizer())
+      assert(shadowed.goals.head.request.names.instances == List("item1", "item"))
+      assert(success(Evaluator.evaluate(success(shadowed.result).target)) == Value.Integer(2))
+    }
+
+    test("the functional SMT wrapper preserves retained problems and decodes exact model values") {
+      import implicitlang.smt.*
+      import implicitlang.smt.Smt.*
+      val number = SmtConstant("number", SmtSort.Int)
+      val expected = BigInt("123456789012345678901234567890")
+      val problem = SmtProblem(
+        Vector.empty, Vector.empty, Vector(number),
+        Vector(SmtConstraint("given", number === int(expected))), Vector(SmtObservation("number", number))
+      )
+      val solver = new SmtNativeSolver
+      def answer(problem: SmtProblem[String]): SmtAnswer = {
+        success(solver.check(problem, 1000).mapError(failure => Error.SynthesisBackend(failure.cause))).answer
+      }
+      val first = answer(problem)
+      first match {
+        case SmtAnswer.Sat(model) => assert(model("number") == SmtValue.Integer(expected))
+        case other => throw new AssertionError(s"Expected a model, received $other")
+      }
+      val contradiction = problem.copy(constraints = problem.constraints :+ SmtConstraint("contradiction", number < int(0)))
+      assert(answer(contradiction) == SmtAnswer.Unsat)
+      assert(problem.constraints.size == 1 && first == answer(problem))
+      assert(!scala.compiletime.testing.typeChecks(
+        "import implicitlang.smt.*; import implicitlang.smt.Smt.*; bool(true) + int(1)"
+      ))
+    }
+
+    test("synthesis reports expose the real bounded queries and a checked evidence program") {
+      import implicitlang.smt.*
+      val wanted = Type.Record(Map("value" -> Type.IntType))
+      val producer = Type.Forall(Type.Implicit(Type.Variable(0), Type.Record(Map("value" -> Type.Variable(0)))))
+      val context = SynthesisContext(List(producer, Type.IntType), 0)
+      val report = new SmtSynthesizer(SynthesisLimits(maximumSteps = 4)).inspect(wanted, context)
+      success(report.result)
+      assert(report.attempts.nonEmpty && report.attempts.head.spineCount == 1)
+      assert(report.evidence.exists(program => program.cost <= 4 && program.spines.last.result == wanted))
+      val accepted = report.attempts.last
+      assert(accepted.refinements.isEmpty && accepted.spineCount == 2)
+      val replay = success(new SmtNativeSolver().check(accepted.problem, 1000)
+        .mapError(failure => Error.SynthesisBackend(failure.cause)))
+      assert(replay.answer.isInstanceOf[SmtAnswer.Sat])
+      assert(accepted.problem.smtlib(1000).contains("(define-funs-rec"))
+      assert(accepted.problem.constraints.exists(_.origin.rule == implicitlang.synthesis.ConstraintRule.ImplicitApplication))
     }
 
     println(s"$passed passed; $failed failed")

@@ -1,15 +1,4 @@
 target/
-project/target/
-.bsp/
-.metals/
-docs/*.aux
-docs/*.log
-docs/*.out
-
-target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
 
 ### IntelliJ IDEA ###
 .idea/
@@ -63,6 +52,41 @@ build/
 *.class
 *.tasty
 *.sjsir
+*.jar
+
+### Native and WebAssembly build outputs ###
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.wasm
+*.js.map
+*.css.map
+
+### Dependency and tool caches ###
+.cache/
+.npm/
+.sbt/
+.ivy2/
+.coursier/
+node_modules/
+.vite/
+.eslintcache
+.prettiercache
+
+### JavaScript builds and test reports ###
+dist/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+blob-report/
 
 tmp/
 temp/
@@ -78,3 +102,9 @@ temp/
 *.fdb_latexmk
 *.synctex.gz
 *.minted
+/docs/calculus.pdf
+
+### Playground ###
+playground/.compiler/
+playground/public/z3/
+playground/public/coi-serviceworker.js

@@ -145,8 +145,8 @@ final class Elaborator {
 
     /** Λᾱ.λ{d₁:D₁}.…λ{dₙ:Dₙ}.c : ∀ᾱ.D₁ ⇒ … ⇒ Dₙ ⇒ A. */
     def abstractValue(value: Elaborated): Elaborated = {
-      val constrained = constraints.foldRight(value.expression)(ImplicitTerm.ImplicitLam.apply)
-      val expression = parameters.foldRight(constrained)((_, body) => ImplicitTerm.TypeLam(body))
+      val constrained = constraints.foldRight(value.expression)((tpe, body) => ImplicitTerm.ImplicitLam(tpe, body))
+      val expression = parameters.foldRight(constrained)((name, body) => ImplicitTerm.TypeLam(body, Some(name)))
       Elaborated(expression, qualify(value.tpe))
     }
   }
@@ -164,8 +164,8 @@ final class Elaborator {
 
     def abstractValue(value: Elaborated): Elaborated = {
       val expression = kind match {
-        case ParameterKind.Ordinary => ImplicitTerm.Lam(tpe, value.expression)
-        case ParameterKind.Implicit => ImplicitTerm.ImplicitLam(tpe, value.expression)
+        case ParameterKind.Ordinary => ImplicitTerm.Lam(tpe, value.expression, Some(name))
+        case ParameterKind.Implicit => ImplicitTerm.ImplicitLam(tpe, value.expression, Some(name))
       }
       Elaborated(expression, functionType(value.tpe))
     }
@@ -231,7 +231,7 @@ final class Elaborator {
       checked <- elaborate(body, bodyScope, Some(result))
       parameterized = arguments.foldRight(checked)((parameter, value) => parameter.abstractValue(value))
       abstracted = resolved.abstractValue(parameterized)
-      value = if recursive then ImplicitTerm.Fix(signature, abstracted.expression) else abstracted.expression
+      value = if recursive then ImplicitTerm.Fix(signature, abstracted.expression, Some(name)) else abstracted.expression
     } yield Elaborated(value, signature)
   }
 
@@ -242,8 +242,11 @@ final class Elaborator {
     def bind(name: String, value: Elaborated, space: Space, rest: List[Declaration]): Result[Elaborated, Error] = {
       elaborateDeclarations(rest, body, scope.bind(name, value.tpe, space), expected).map { result =>
         val expression = space match {
-          case Space.Ordinary => ImplicitTerm.Let(value.tpe, value.expression, result.expression)
-          case Space.Instance => ImplicitTerm.Impl(value.tpe, value.expression, result.expression)
+          case Space.Ordinary => ImplicitTerm.Let(value.tpe, value.expression, result.expression, Some(name))
+          case Space.Instance => {
+            val hint = Option.when(!name.startsWith("@"))(name)
+            ImplicitTerm.Impl(value.tpe, value.expression, result.expression, hint)
+          }
         }
         Elaborated(expression, result.tpe)
       }
@@ -315,7 +318,7 @@ final class Elaborator {
             case _ => Result.Ok(())
           }
           result <- elaborate(body, scope.bind(name, parameter, Space.Ordinary), context.map(_.result))
-        } yield Elaborated(ImplicitTerm.Lam(parameter, result.expression), Type.Arrow(parameter, result.tpe))
+        } yield Elaborated(ImplicitTerm.Lam(parameter, result.expression, Some(name)), Type.Arrow(parameter, result.tpe))
       }
       /*
        * Γ; Δ, d:A ⊢ e:B ⇝ c
@@ -332,7 +335,9 @@ final class Elaborator {
             case None => Result.Ok(None)
           }
           result <- elaborate(body, scope.bind(name, parameter, Space.Instance), resultType)
-        } yield Elaborated(ImplicitTerm.ImplicitLam(parameter, result.expression), Type.Implicit(parameter, result.tpe))
+        } yield Elaborated(
+          ImplicitTerm.ImplicitLam(parameter, result.expression, Some(name)), Type.Implicit(parameter, result.tpe)
+        )
       }
       case SurfaceExpr.App(function, argument) => {
         elaborate(function, scope, None).map(exposeExplicitArrow).flatMap { prepared =>
@@ -366,7 +371,7 @@ final class Elaborator {
             case None => Result.Ok(None)
           }
           result <- elaborate(body, scope.bindType(parameter), bodyType)
-        } yield Elaborated(ImplicitTerm.TypeLam(result.expression), Type.Forall(result.tpe))
+        } yield Elaborated(ImplicitTerm.TypeLam(result.expression, Some(parameter)), Type.Forall(result.tpe))
       }
       case SurfaceExpr.TypeApp(function, argument) => {
         for {
@@ -389,7 +394,7 @@ final class Elaborator {
         for {
           checked <- elaborate(value, scope, None)
           result <- elaborate(body, scope.bind(name, checked.tpe, Space.Ordinary), expected)
-        } yield Elaborated(ImplicitTerm.Let(checked.tpe, checked.expression, result.expression), result.tpe)
+        } yield Elaborated(ImplicitTerm.Let(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe)
       }
       /*
        * Γ; Δ ⊢ e₁:A ⇝ c₁    Γ; Δ,d:A ⊢ e₂:B ⇝ c₂
@@ -401,7 +406,7 @@ final class Elaborator {
           declared <- resolveType(annotation, scope)
           checked <- elaborate(value, scope, Some(declared))
           result <- elaborate(body, scope.bind(name, checked.tpe, Space.Instance), expected)
-        } yield Elaborated(ImplicitTerm.Impl(checked.tpe, checked.expression, result.expression), result.tpe)
+        } yield Elaborated(ImplicitTerm.Impl(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe)
       }
       case SurfaceExpr.Need(annotation) => {
         resolveType(annotation, scope).map(tpe => Elaborated(ImplicitTerm.Need(tpe), tpe))

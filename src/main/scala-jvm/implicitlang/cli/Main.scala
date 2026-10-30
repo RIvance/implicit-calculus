@@ -1,25 +1,18 @@
 package implicitlang.cli
 
-import implicitlang.`implicit`.Elaborated
-import implicitlang.core.{Term, Evaluator, Value}
+import implicitlang.{Compiler, Compilation}
+import implicitlang.`implicit`.ImplicitPrinter
+import implicitlang.core.{Evaluator, Value}
 import implicitlang.diagnostic.Error
-import implicitlang.resolution.Resolver
-import implicitlang.surface.{Program, Parser, Elaborator}
 import implicitlang.synthesis.{Synthesizer, SmtSynthesizer}
 import implicitlang.util.Result
 
 import java.nio.file.{Files, Path}
 import scala.util.control.NonFatal
 
-final case class Compilation(source: Program, core: Elaborated, target: Term)
-
 object Pipeline {
   def compile(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Compilation, Error] = {
-    for {
-      program <- new Parser().parse(source)
-      checked <- new Elaborator().elaborate(program)
-      target <- new Resolver(synthesizer).resolve(checked)
-    } yield Compilation(program, checked, target)
+    Compiler.prepare(source).flatMap(_.resolve.run(synthesizer).result)
   }
 
   def run(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Value, Error] = {
@@ -43,8 +36,8 @@ object Main {
         case Result.Ok(compilation) => {
           if arguments.contains("--dump") then {
             println(s"First AST: ${compilation.source}")
-            println(s"Implicit term: ${compilation.core.expression}")
-            println(s"Implicit term type: ${compilation.core.tpe.show}")
+            println(s"Implicit term: ${ImplicitPrinter.term(compilation.elaborated.expression)}")
+            println(s"Implicit term type: ${ImplicitPrinter.tpe(compilation.elaborated.tpe)}")
             println(s"Target: ${compilation.target}")
           }
           Evaluator.evaluate(compilation.target) match {

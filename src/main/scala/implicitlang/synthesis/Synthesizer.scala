@@ -15,4 +15,6 @@ trait Synthesizer {
    * The resolver checks this restricted grammar, the source type, and the explicit target type.
    */
   def synthesize(goal: Type, context: SynthesisContext): Result[ImplicitTerm, Error]
+
+  def inspect(goal: Type, context: SynthesisContext): SynthesisReport = SynthesisReport(synthesize(goal, context))
 }

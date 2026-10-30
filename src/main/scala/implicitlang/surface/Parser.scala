@@ -6,21 +6,23 @@ import implicitlang.util.Result
 
 import scala.util.parsing.combinator.JavaTokenParsers
 
-/** A program has a declaration prefix and a final expression; let and given bind within expressions. */
-final class Parser extends JavaTokenParsers {
-  override protected val whiteSpace = """(\s+|//[^\r\n]*|(?s:/\*.*?\*/))+""".r
-
-  private val reserved = Set(
+object Parser {
+  val keywords: Set[String] = Set(
     "let", "def", "implement", "instance", "given", "implicit", "using", "trait", "type", "where", "and", "in",
     "forall", "summon", "Int", "String", "Bool", "true", "false"
   )
+}
+
+/** A program has a declaration prefix and a final expression; let and given bind within expressions. */
+final class Parser extends JavaTokenParsers {
+  override protected val whiteSpace = """(\s+|//[^\r\n]*|/\*[\s\S]*?\*/)+""".r
 
   private def keyword(word: String): Parser[String] = {
     (java.util.regex.Pattern.quote(word) + """(?![\p{L}\p{N}_$])""").r
   }
 
   private def name: Parser[String] = ident ^? (
-    { case value if !reserved.contains(value) => value },
+    { case value if !implicitlang.surface.Parser.keywords.contains(value) => value },
     value => s"Reserved word '$value' cannot be a name"
   )
 

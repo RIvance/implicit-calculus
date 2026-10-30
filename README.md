@@ -2,7 +2,7 @@
 
 A research implementation of bounded SMT synthesis for implicit evidence in a two-context calculus.
 The synthesizer jointly chooses polymorphic type arguments and compositions of available values,
-using type instantiation and implicit application. The [formal specification](docs/calculus.pdf) develops
+using type instantiation and implicit application. The [formal specification](docs/calculus.tex) develops
 the constraints, a worked satisfying model and its typing derivation, and the search's guarantees and bounds.
 
 The Scala 3 implementation includes a surface language whose traits describe record dictionaries.
@@ -37,6 +37,23 @@ and ARM64, and Windows x86-64 and x86. The host must supply the native C++ runti
 On Linux, sbt also locates an available C++ compiler's runtime for the child JVM's library
 path, allowing installations outside the system loader's default directories. An unsupported
 platform fails explicitly. The checksum pins the Z3 artifact; it does not pin the host OS or JDK.
+
+## Browser playground
+
+The [synthesis workbench](playground/README.md) combines a Monaco editor with interactive
+evidence graphs, each goal's context, actual SMT constraints and models, search playback,
+configurable bounds, and exact-lookup comparisons. It also supports source sharing, run history,
+query and report export, cancellation, and dark mode.
+
+```sh
+cd playground
+npm ci
+npm run dev
+```
+
+Use Node.js 22.12 or newer. The Scala.js compiler and Z3 WebAssembly solver run locally in a
+browser worker. The playground is a separate sbt/npm project that depends on the shared compiler.
+Its README covers production builds, static hosting, and browser tests.
 
 ## Surface syntax stays practical
 
@@ -255,6 +272,12 @@ Ordinary application inserts missing arguments for leading implicit arrows only;
 lookup does not eagerly force an implicit function. An explicit `f(using e)` does not search.
 Type applications are not inferred and do not automatically pass intervening implicit arrows.
 
+`Compiler.prepare` returns a parsed and elaborated program. Its `resolve` operation suspends
+at evidence requests, allowing synchronous JVM execution or asynchronous browser execution
+of the same traversal. A resolution report retains every completed goal, its synthesis attempts,
+and independent evidence validation, including when a later goal fails. Implicit binders carry
+optional source-name hints for mathematical display; binding identity remains index-based.
+
 `ToString[A]::toString(x)` selects a member of an implementation requested for `ToString[A]`.
 The parser retains `P::member` as a qualified selection. Elaboration resolves `P` as a trait
 reference or an ordinary type, requests its expanded dictionary type, and selects the member.
@@ -308,12 +331,42 @@ between different solutions with the same chain count.
 `SynthesisUnknown` preserves Z3's reason, including timeout, and `SynthesisBackend` preserves
 a native/API failure's cause. Neither is reported as a missing instance. With an empty Δ,
 or after exhaustive search of the finite universal-free fragment, `MissingInstance` is a
-proven absence. The [formal specification, Section 5](docs/calculus.pdf) gives the encoding,
+proven absence. The [formal specification, Section 5](docs/calculus.tex) gives the encoding,
 its bounds, and the independent validation contract. Sections 5.4–5.5 work through a complete
-query, a satisfying model, and the resulting evidence derivation. Each request owns and closes its native context.
+query, a satisfying model, and the resulting evidence derivation. Each native check owns and closes its context.
 
 `NaiveSynthesizer` remains available as an exact-lookup baseline for comparisons. It performs
 no instantiation or composition and is not a fallback for SMT failure.
+
+### Shared solver interface
+
+[The SMT algebra](src/main/scala/implicitlang/smt/Smt.scala) provides immutable, sorted
+expressions with Scala operators:
+
+```scala
+import implicitlang.smt.*
+import implicitlang.smt.Smt.*
+
+val head = SmtConstant("head", SmtSort.Int)
+val active = SmtConstant("active", SmtSort.Bool)
+val permitted = active.implies((int(0) <= head) && (head < int(3)))
+```
+
+`SmtProblem` groups datatype declarations, recursive definitions, constants, constraints,
+and requested model observations. Constraint provenance accompanies formulas without changing
+their meaning. Both adapters consume the same SMT-LIB representation and return immutable
+integer, Boolean, and constructor values; retained problems and models contain no native handles.
+
+`SmtSolver[F]` separates the execution effect from those values: the JVM adapter returns a
+`Result` directly, while the Scala.js adapter returns a `Future[Result[...]]`. Unsatisfiability,
+solver unknown, and backend failures remain distinct. The browser worker owns its WebAssembly
+module; individual checks release their solver and model resources.
+
+`SmtSearch` is the shared pure search state machine. It yields a query or a completed report;
+resuming a query records its actual response and either accepts evidence, adds guarded validity
+constraints, or grows the spine count. Execution boundaries own deadlines. Reports expose the
+actual problems, models, refinements, and evidence spines used by the search, so tools can inspect
+the algorithm without reproducing it.
 
 ## Organization
 
@@ -323,17 +376,23 @@ resolution supplies evidence and merges the two binding spaces into an explicit 
 
 ```text
 src/main/scala/implicitlang/
+  Compiler.scala  prepared programs and compilation results
   surface/        Program.scala, SurfaceExpr.scala, SurfaceType.scala, Parser.scala, Elaborator.scala
-  implicit/       ImplicitTerm.scala
+  implicit/       ImplicitTerm.scala, ImplicitPrinter.scala
   core/           Type.scala, Term.scala, OpKind.scala, TypeChecker.scala, Evaluator.scala
   diagnostic/     Error.scala
-  synthesis/      Synthesizer.scala, NaiveSynthesizer.scala, SmtSynthesizer.scala, SmtTypes.scala
-  resolution/     Resolver.scala
-  cli/            Main.scala  (Pipeline, Main)
+  smt/            Smt.scala
+  synthesis/      Synthesizer.scala, NaiveSynthesizer.scala, SmtSearch.scala, SmtTypes.scala
+  resolution/     Resolver.scala, Resolution.scala
   util/           Result.scala
+src/main/scala-jvm/implicitlang/
+  cli/            Main.scala  (Pipeline, Main)
+  smt/            SmtNativeSolver.scala
+  synthesis/      SmtSynthesizer.scala
+src/main/scala-js/implicitlang/smt/SmtBrowserSolver.scala
 src/test/scala/implicitlang/CalculusTests.scala
+playground/       Scala.js bridge, React application, browser tests
 docs/calculus.tex
-docs/calculus.pdf
 examples/*.imp
 ```
 
