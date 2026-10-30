@@ -6,7 +6,7 @@ module system, global instance registry, or separate concrete/surface parse tree
 
 ## Run
 
-Use JDK 17 or newer and sbt with access to Maven Central:
+Use JDK 17 or newer and sbt with access to Maven Central and GitHub releases:
 
 ```sh
 sbt test
@@ -15,8 +15,23 @@ sbt 'runMain implicitlang.cli.Main examples/first-class.imp --dump'
 sbt 'runMain implicitlang.cli.Main examples/polymorphic.imp'
 ```
 
-The pinned dependencies are Scala 3.3.6, scala-parser-combinators 2.4.0, and sbt 1.10.7.
+The pinned dependencies are Scala 3.3.6, scala-parser-combinators 2.4.0, sbt 1.10.7,
+and the **official Z3 4.14.1 Java API and native libraries**.
 Tests use a small executable harness rather than an additional testing library.
+
+[The sbt dependency task](project/SmtDependency.scala) downloads an exact archive from
+[Z3's official release](https://github.com/Z3Prover/z3/releases/tag/z3-4.14.1), verifies its
+committed SHA-256 checksum, and extracts the matching JAR and native libraries into
+`target/z3/`. Subsequent builds verify the archive and check the extracted files against it.
+A changed archive fails verification. No Z3 binaries are tracked in Git or installed into
+system or user directories. Library paths are set only for this project's forked JVMs;
+the parent shell and its configuration are untouched. `sbt clean` removes the local download.
+
+Pinned archives cover Linux x86-64 (glibc 2.35+) and ARM64 (glibc 2.34+), macOS x86-64
+and ARM64, and Windows x86-64 and x86. The host must supply the native C++ runtime.
+On Linux, sbt also locates an available C++ compiler's runtime for the child JVM's library
+path, allowing installations outside the system loader's default directories. An unsupported
+platform fails explicitly. The checksum pins the Z3 artifact; it does not pin the host OS or JDK.
 
 ## Surface syntax stays practical
 
@@ -228,14 +243,29 @@ It rejects references to Γ, new lambdas/literals, unresolved goals, ill-scoped 
 and explicit/implicit arrow mismatches. The result therefore composes available first-class
 implementations instead of inventing arbitrary terms of the desired type.
 
-`NaiveSynthesizer` scans Δ from nearest to farthest and returns the first exactly equal type.
-That is the entire baseline: no polymorphic instantiation, recursive prerequisite search,
-head matching, backtracking, or ambiguity analysis. **Even when a generic producer would
-be easy to instantiate by matching, the baseline intentionally fails.** This preserves
-an experimental separation from later synthesis algorithms; it does not establish that
-SMT is the only way to improve the resolver. Polymorphic producers remain first-class
-and can already be applied explicitly and installed with `impl`. Discovering their type
-arguments and compositions is intentionally left to a replacement SMT synthesizer.
+`SmtSynthesizer` is the default. An exactly matching implementation still selects the nearest
+binding. Otherwise Z3 chooses type arguments and composes available values through explicit
+and implicit application. Type arguments may themselves contain functions, records, or
+universals; in-scope type variables remain rigid. `examples/needs-smt.imp` now infers the
+hidden intermediate type `String` and evaluates to `Ada`.
+
+Search represents evidence as a sequence of application chains, each starting at a Δ
+reference and using earlier chains for value arguments. Its cost counts each head reference
+and each application once. The default limits are **16 construction steps**, **type-argument
+height 8**, and a **10-second search timeout**. These are configurable through `SynthesisLimits`
+when constructing a `SmtSynthesizer` for `Pipeline.compile` or `Pipeline.run`. Among composite
+solutions, search prefers fewer chains; it does not promise coherence or a particular choice
+between different solutions with the same chain count.
+
+`SynthesisLimit` means no evidence was found within the construction and type bounds.
+`SynthesisUnknown` preserves Z3's reason, including timeout, and `SynthesisBackend` preserves
+a native/API failure's cause. Neither is reported as a missing instance. With an empty Δ,
+or after exhaustive search of the finite universal-free fragment, `MissingInstance` is a
+proven absence. The [formal specification](docs/calculus.pdf) gives the encoding, its bounds,
+and the independent validation contract. Each request owns and closes its native context.
+
+`NaiveSynthesizer` remains available as an exact-lookup baseline for comparisons. It performs
+no instantiation or composition and is not a fallback for SMT failure.
 
 ## Organization
 
@@ -249,7 +279,7 @@ src/main/scala/implicitlang/
   parser/         Parser.scala
   core/           Type.scala, ImplicitTerm.scala, Term.scala
   elaboration/    Elaborator.scala
-  synthesis/      Synthesizer.scala, NaiveSynthesizer.scala
+  synthesis/      Synthesizer.scala, NaiveSynthesizer.scala, SmtSynthesizer.scala, SmtTypes.scala
   resolution/     Resolver.scala
   evaluation/     Evaluator.scala
   cli/            Main.scala  (Pipeline, Main)
@@ -294,7 +324,7 @@ Adding an example requires no Scala test changes.
 
 Tests cover declaration parsing, Γ/Δ separation, scope and shadowing, type weakening,
 alias capture, first-class values, explicit implementation arguments, malformed types,
-final checking, and replacement-synthesizer validation.
+SMT composition and polymorphism, search limits, final checking, and replacement-synthesizer validation.
 
 ## Deliberate boundaries
 

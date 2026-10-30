@@ -1,0 +1,12 @@
+// result: {number = 21, text = Ada}
+
+type Identity = forall A. A -> A
+
+impl preserve[A]: A -> A = (value: A) => value
+
+// A is instantiated with the whole universally quantified Identity type.
+let copy = summon[Identity -> Identity]
+let identity: Identity = [A] => (value: A) => value
+let copied: Identity = copy(identity)
+
+{ number = copied[Int](21), text = copied[String]("Ada") }

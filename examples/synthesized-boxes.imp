@@ -1,0 +1,9 @@
+// result: Ada
+
+type Box[A] = { value: A }
+
+impl text: String = "Ada"
+impl box[A]: A ~> Box[A] = (implicit value: A) => { value = value }
+
+// The same polymorphic producer supplies both layers of the requested type.
+summon[Box[Box[String]]].value.value

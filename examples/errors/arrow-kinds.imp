@@ -1,0 +1,6 @@
+// error: MissingInstance(Implicit(IntType,IntType))
+
+impl identity: Int -> Int = (number: Int) => number
+
+// An ordinary function does not satisfy an implicit-function request.
+summon[Int ~> Int]

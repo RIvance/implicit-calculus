@@ -1,0 +1,13 @@
+// result: {count = 21, value = Ada}
+
+type Counted[A] = { value: A, count: Int }
+
+impl text: String = "Ada"
+impl count: Int = 21
+impl counted[A]: A -> (Int ~> Counted[A]) = (value: A, implicit count: Int) => {
+  value = value
+  count = count
+}
+
+// Synthesis infers A and supplies an ordinary argument followed by an implicit one.
+summon[Counted[String]]

@@ -1,0 +1,7 @@
+// error: MissingInstance(IntType)
+
+impl positive: Int -> Bool = (number: Int) => number > 0
+impl answer: Bool -> Int = (enabled: Bool) => 21
+
+// Neither producer can run until a value of Int or Bool is available.
+summon[Int]

@@ -254,6 +254,42 @@ Result.Err(
 Do not force a complicated expression onto one line merely because it fits
 under 120 columns. Layout should expose the expression's structure.
 
+### Wrap argument lists as units
+
+When a line break separates sibling arguments, put the first argument on the
+line after `(` too. Indent the argument block by two spaces and align the closing
+`)` with the indentation of the line that opened the list. Do not leave the first
+arguments on the opening line and move only the remaining arguments below it,
+even with correct indentation:
+
+```scala
+// Avoid
+solver.add(native.mkImplies(active, native.mkAnd(inScope(head, size),
+  inScope(length, maximum))))
+```
+
+Apply the rule to the argument list being split. Outer calls may remain
+compact around a multiline nested argument, and closing parentheses may be
+grouped. Both layouts below are valid:
+
+```scala
+solver.add(native.mkImplies(active, native.mkAnd(
+  inScope(head, size),
+  inScope(length, maximum)
+)))
+
+solver.add(
+  native.mkImplies(active, native.mkAnd(
+    inScope(head, size),
+    inScope(length, maximum)
+  ))
+)
+```
+
+Short sibling arguments may share a line within the argument block. Keep the
+whole expression inline when that is readable; wrapping a nested call does
+not require expanding every enclosing call.
+
 ### Strict block indentation: never deep-align
 
 Deep alignment has a specific meaning: a wrapped continuation is indented to

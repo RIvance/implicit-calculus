@@ -1,0 +1,11 @@
+// result: {number = 21, text = Ada}
+
+impl first[A, B]: A -> B -> A = (a: A, b: B) => a
+
+def keep[T](value: T): T = {
+  // T remains fixed while the synthesized function retains its own B binder.
+  let choose = summon[forall B. T -> B -> T]
+  choose[String](value, "ignored")
+}
+
+{ number = keep[Int](21), text = keep[String]("Ada") }

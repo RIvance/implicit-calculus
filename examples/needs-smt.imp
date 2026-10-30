@@ -1,4 +1,4 @@
-// error: MissingInstance(Record(Vector((toString,Arrow(Record(Vector((name,StringType))),StringType)))))
+// result: Ada
 
 trait ToString[A] = { toString: A -> String }
 trait Repr[A, B] = { repr: A -> B }
@@ -16,5 +16,5 @@ impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] = {
   toString = (x: A) => ToString[B]::toString(Repr[A, B]::repr(x))
 }
 
-// Expected failure with NaiveSynthesizer: discovering the intermediate type needs more than exact lookup.
+// Synthesis discovers B = String from the available implementations.
 ToString[Person]::toString({ name = "Ada" })

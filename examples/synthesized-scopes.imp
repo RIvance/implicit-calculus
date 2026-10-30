@@ -1,0 +1,18 @@
+// result: {first = Ada, second = Grace}
+
+type Box[A] = { value: A }
+
+impl box[A where A]: Box[A] = { value = summon[A] }
+
+let first = {
+  impl String = "Ada"
+  summon[Box[String]].value
+}
+
+let second = {
+  impl String = "Grace"
+  summon[Box[String]].value
+}
+
+// Each request composes the producer with the implementation in its own block.
+{ first = first, second = second }

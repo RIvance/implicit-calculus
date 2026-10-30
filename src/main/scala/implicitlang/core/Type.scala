@@ -63,6 +63,9 @@ enum Type {
     case Record(fields) => {
       for {
         _ <- Check.distinct(fields.map(_._1))
+        _ <-
+          if fields.map(_._1) == fields.map(_._1).sorted then Result.Ok(())
+          else Result.Err(Error.NonCanonicalRecord(fields.map(_._1)))
         _ <- Result.traverse(fields)(field => field._2.validate(depth, allowImplicit))
       } yield ()
     }

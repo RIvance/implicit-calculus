@@ -4,7 +4,7 @@ import implicitlang.syntax.{Expr, TypeExpr, OpKind}
 import implicitlang.core.{ImplicitTerm, Type, Term, Elaborated}
 import implicitlang.parser.Parser
 import implicitlang.elaboration.Elaborator
-import implicitlang.synthesis.{Synthesizer, SynthesisContext, NaiveSynthesizer}
+import implicitlang.synthesis.{Synthesizer, SynthesisContext, NaiveSynthesizer, SmtSynthesizer, SynthesisLimits}
 import implicitlang.cli.Pipeline
 import implicitlang.evaluation.Value
 
@@ -712,6 +712,143 @@ object CalculusTests {
     }
 
     testExamples(Path.of("examples"))
+
+    test("SMT synthesis chooses the nearest exact implementation") {
+      val context = SynthesisContext(List(Type.IntType, Type.IntType), typeDepth = 0)
+      assert(success(new SmtSynthesizer().synthesize(Type.IntType, context)) == ImplicitTerm.Instance(0))
+    }
+
+    test("SMT synthesis composes ordinary and implicit producers") {
+      val source = """
+        |impl text: String = "Ada"
+        |impl toNumber: String -> Int = (text: String) => 21
+        |impl toBool: Int ~> Bool = (implicit number: Int) => number > 0
+        |summon[Bool]
+        |""".stripMargin
+      assert(run(source) == Value.Boolean(true))
+    }
+
+    test("SMT synthesis instantiates a producer with a function type") {
+      val source = """
+        |impl identity[A]: A -> A = (a: A) => a
+        |let twice = summon[(Int -> Int) -> (Int -> Int)]
+        |twice((n: Int) => n + 1)(20)
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+    }
+
+    test("SMT synthesis preserves rigid variables beneath nested universals") {
+      val source = """
+        |impl choose[A, B]: A -> B -> A = (a: A, b: B) => a
+        |def specialize[T](x: T): T = {
+        |  let selected = summon[forall B. T -> B -> T]
+        |  selected[String](x, "ignored")
+        |}
+        |specialize[Int](21)
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+    }
+
+    test("SMT synthesis supports impredicative type arguments") {
+      val polymorphic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
+      val wanted = Type.Arrow(polymorphic, polymorphic)
+      val found = new SmtSynthesizer().synthesize(wanted, SynthesisContext(List(polymorphic), 0))
+      assert(success(found) == ImplicitTerm.TypeApp(ImplicitTerm.Instance(0), polymorphic))
+    }
+
+    test("SMT synthesis can apply a function exposed by an inferred type argument") {
+      val source = """
+        |(implicit produce: forall A. (A -> Int) -> A,
+        | implicit handler: (String -> Bool) -> Int,
+        | implicit text: String) => summon[Bool]
+        |""".stripMargin
+      val compilation = success(Pipeline.compile(source))
+      assert(success(compilation.target.infer()) == compilation.core.tpe.erased)
+    }
+
+    test("SMT synthesis can instantiate a universal exposed after value application") {
+      val source = """
+        |(implicit produce: forall A. (A -> Int) -> A,
+        | implicit handler: (forall B. B -> B) -> Int) => summon[Int -> Int]
+        |""".stripMargin
+      val compilation = success(Pipeline.compile(source))
+      assert(success(compilation.target.infer()) == compilation.core.tpe.erased)
+    }
+
+    test("SMT synthesis does not unify distinct rigid type variables") {
+      expectFailure(new SmtSynthesizer().synthesize(Type.Variable(1), SynthesisContext(List(Type.Variable(0)), 2))) {
+        case Error.MissingInstance(Type.Variable(1)) => true
+        case _ => false
+      }
+    }
+
+    test("bounded polymorphic failure does not claim uninhabitability") {
+      val producer = Type.Forall(Type.Implicit(Type.Variable(0), Type.Variable(0)))
+      val synthesizer = new SmtSynthesizer(SynthesisLimits(maximumSteps = 2))
+      expectFailure(synthesizer.synthesize(Type.StringType, SynthesisContext(List(producer), 0))) {
+        case Error.SynthesisLimit(Type.StringType, 2, _) => true
+        case _ => false
+      }
+    }
+
+    test("SMT synthesis rejects cyclic prerequisites without a seed") {
+      val context = SynthesisContext(List(Type.Implicit(Type.IntType, Type.IntType)), 0)
+      expectFailure(new SmtSynthesizer().synthesize(Type.IntType, context)) {
+        case Error.MissingInstance(Type.IntType) => true
+        case _ => false
+      }
+    }
+
+    test("SMT search limits are distinct from missing evidence") {
+      val context = SynthesisContext(List(Type.Arrow(Type.StringType, Type.IntType), Type.StringType), 0)
+      expectFailure(new SmtSynthesizer(SynthesisLimits(maximumSteps = 2)).synthesize(Type.IntType, context)) {
+        case Error.SynthesisLimit(Type.IntType, 2, _) => true
+        case _ => false
+      }
+      assert(success(new SmtSynthesizer().synthesize(Type.IntType, context)) ==
+        ImplicitTerm.App(ImplicitTerm.Instance(0), ImplicitTerm.Instance(1)))
+    }
+
+    test("SMT type-argument depth limits are explicit") {
+      val polymorphic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
+      val argument = Type.Arrow(Type.IntType, Type.IntType)
+      val wanted = Type.Arrow(argument, argument)
+      val synthesizer = new SmtSynthesizer(SynthesisLimits(maximumSteps = 2, maximumTypeDepth = 1))
+      expectFailure(synthesizer.synthesize(wanted, SynthesisContext(List(polymorphic), 0))) {
+        case Error.SynthesisLimit(actual, 2, 1) => actual == wanted
+        case _ => false
+      }
+    }
+
+    test("SMT queries preserve their caller's context across success and failure") {
+      val synthesizer = new SmtSynthesizer()
+      val instances = List(Type.Arrow(Type.StringType, Type.IntType), Type.StringType)
+      val context = SynthesisContext(instances, 0)
+      val first = success(synthesizer.synthesize(Type.IntType, context))
+      expectFailure(synthesizer.synthesize(Type.BoolType, context)) {
+        case Error.MissingInstance(Type.BoolType) => true
+        case _ => false
+      }
+      assert(success(synthesizer.synthesize(Type.IntType, context)) == first)
+      assert(context.instances == instances && context.typeDepth == 0)
+    }
+
+    test("SMT input validation rejects ill-scoped types and noncanonical records") {
+      val synthesizer = new SmtSynthesizer()
+      expectFailure(synthesizer.synthesize(Type.Variable(0), SynthesisContext(Nil, 0))) {
+        case Error.InvalidTypeIndex(0, 0) => true
+        case _ => false
+      }
+      expectFailure(synthesizer.synthesize(Type.IntType, SynthesisContext(List(Type.Variable(1)), 1))) {
+        case Error.InvalidTypeIndex(1, 1) => true
+        case _ => false
+      }
+      val record = Type.Record(Vector("z" -> Type.IntType, "a" -> Type.StringType))
+      expectFailure(synthesizer.synthesize(record, SynthesisContext(List(record), 0))) {
+        case Error.NonCanonicalRecord(Vector("z", "a")) => true
+        case _ => false
+      }
+    }
 
     test("baseline does not instantiate polymorphic implementations") {
       val generic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))

@@ -1,0 +1,16 @@
+// result: {first = 21, second = Ada}
+
+trait Default[A] = { value: A }
+type Pair[A, B] = { first: A, second: B }
+
+impl Default[Int] = { value = 21 }
+impl Default[String] = { value = "Ada" }
+
+impl pair[A, B where Default[A] and Default[B]]: Default[Pair[A, B]] = {
+  value = {
+    first = Default[A]::value
+    second = Default[B]::value
+  }
+}
+
+Default[Pair[Int, String]]::value

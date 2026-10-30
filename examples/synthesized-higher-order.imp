@@ -1,0 +1,8 @@
+// result: 21
+
+impl identity[A]: A -> A = (value: A) => value
+
+// The inferred type argument is itself a function type.
+let preserve = summon[(Int -> Int) -> (Int -> Int)]
+
+preserve((number: Int) => number + 1)(20)

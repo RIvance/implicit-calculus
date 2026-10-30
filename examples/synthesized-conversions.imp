@@ -1,0 +1,26 @@
+// result: Hello, Ada!
+
+trait Convert[A, B] = { convert: A -> B }
+type Person = { name: String }
+type Name = { text: String }
+type Greeting = { greeting: String }
+type Message = { body: String }
+
+impl personName: Convert[Person, Name] = {
+  convert = (person: Person) => { text = person.name }
+}
+
+impl greeting: Convert[Name, Greeting] = {
+  convert = (name: Name) => { greeting = "Hello, " ++ name.text }
+}
+
+impl message: Convert[Greeting, Message] = {
+  convert = (greeting: Greeting) => { body = greeting.greeting ++ "!" }
+}
+
+impl compose[A, B, C where Convert[A, B] and Convert[B, C]]: Convert[A, C] = {
+  convert = (value: A) => Convert[B, C]::convert(Convert[A, B]::convert(value))
+}
+
+// Composition infers the intermediate Name and Greeting types.
+Convert[Person, Message]::convert({ name = "Ada" }).body

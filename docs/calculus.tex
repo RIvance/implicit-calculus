@@ -38,7 +38,7 @@
 \newcommand{\fields}[1]{\{#1\}}
 \begin{document}
 {\Large\bfseries\color{ink} A Minimal Calculus of Implicit Implementations}\par
-{\small Scala 3 reference model \hfill 28 October 2026}
+{\small Scala 3 reference model \hfill 29 October 2026}
 
 \section{Types, expressions, and contexts}
 \[
@@ -562,21 +562,132 @@ They may occur inside a previously checked first-class value installed in $\Delt
 These rules \emph{check} a proposed construction. They do not prescribe a search strategy.
 A pluggable algorithm supplies a partial judgment
 \[
-\Delta\vdash_{\mathcal S} A\rightsquigarrow p.
+\Gamma;\Delta\vdash_{\mathcal S} A\rightsquigarrow p.
 \]
 The resolver rechecks $\Pj p A$ before lowering. The source arrow kind is checked before
 erasure, even if two candidate types would erase to the same ordinary function type.
+Search uses $\Gamma$ only for its rigid type variables; its ordinary term bindings
+do not supply evidence.
 
-\subsection*{Exact-lookup placeholder}
+\subsection*{Exact-lookup baseline}
 Let $\Delta=[d_0:A_0,\ldots,d_{m-1}:A_{m-1}]$, nearest binding first.
 \begin{mathpar}
 
 \inferrule*[right=S-Exact]{0\le j<m\\A_j=A\\\forall k<j.\ A_k\ne A}
- {\Delta\vdash_{\mathrm{naive}}A\rightsquigarrow d_j}
+ {\Gamma;\Delta\vdash_{\mathrm{naive}}A\rightsquigarrow d_j}
 \end{mathpar}
-If no $j$ satisfies the premises, the placeholder fails. It does not instantiate a
+If no $j$ satisfies the premises, the baseline fails. It does not instantiate a
 universal type, apply a producer, recurse, or search for a hidden type argument.
 Failure is not an uninhabitability result.
+
+\subsection*{Bounded SMT synthesis}
+The default synthesizer first uses S-Exact. Otherwise it searches application
+\emph{spines}: a head reference followed by a sequence of eliminations. For bounds
+$N,H>0$, a candidate program is
+\[
+\begin{array}{rcl}
+ z_i&=&d_{j_i}\,a_{i,1}\cdots a_{i,\ell_i}\qquad(0\le i\le r<N),\\
+ a_{i,t}&::=&[B]\mid z_k\mid\{z_k\}\qquad(0\le k<i),\\
+ \displaystyle\sum_{i=0}^{r}(1+\ell_i)&\le&N.
+\end{array}
+\]
+The $z_i$ are notation for previously constructed evidence, not new source binders
+or additional members of $\Delta$. Decoding expands these references. A shared
+argument is counted once in the program, even if decoding repeats its evidence tree.
+Every head must be an existing $d_{j_i}:A_{j_i}\in\Delta$.
+
+Introduce symbolic types $T_{i,0},\ldots,T_{i,\ell_i}$ for each spine. The initial
+constraint is $T_{i,0}=A_{j_i}$. Each elimination contributes one of the following
+constraints, writing $U_k=T_{k,\ell_k}$ for a completed earlier spine:
+\[
+\begin{array}{c|l|l}
+a_{i,t}&\text{premises}&T_{i,t}\\ \hline
+[B]&T_{i,t-1}=\forall\alpha.C,\quad\wf B,\quad h(B)\le H&C[B/\alpha]\\
+z_k&T_{i,t-1}=U_k\to C&C\\
+\{z_k\}&T_{i,t-1}=U_k\Rightarrow C&C
+\end{array}
+\]
+Here $h$ is constructor height: base types and variables have height one,
+arrows and universals add one to their children's maximum height, and a record
+has height one plus its deepest field type (the empty record has height one).
+The final constraint is $U_r=A$, the requested type. Both kinds of arrow remain
+distinct throughout this search.
+
+The solver considers increasing numbers of spines, up to $N$, with the same total
+cost bound. A successful result need not minimize cost or select a unique proof
+among solutions with the same number of spines. Only the initial nearest-exact
+preference is a lexical priority rule; no general coherence property is claimed.
+The implementation defaults to $N=16$, $H=8$, and a ten-second search timeout.
+These limits are configurable and do not restrict explicit evidence written by the programmer.
+
+\textbf{Type encoding.} Types and ordered field lists are algebraic datatypes in
+SMT. Existing type variables are rigid de Bruijn indices, not unification
+metavariables; inferred type arguments are symbolic values of the type datatype.
+At ambient depth $q$, well-formedness requires $0\le i<q$ for a variable
+$\underline i$ and increases $q$ beneath $\forall$. Record labels must be distinct
+and ordered. Type arguments may contain nested universals as well as either arrow.
+
+Instantiation removes one binder and avoids capture. If $I_k(C,B)$ substitutes
+for the binder beneath $k$ retained universals, its variable and universal cases are
+\[
+I_k(\underline i,B)=
+\begin{cases}
+ \underline i&i<k,\\
+ \mathord{\uparrow}^{k}_{0}B&i=k,\\
+ \underline{i-1}&i>k,
+\end{cases}
+\qquad
+I_k(\forall.C,B)=\forall.I_{k+1}(C,B).
+\]
+The operation is homomorphic on the remaining constructors. The shift
+$\mathord{\uparrow}^{k}_{0}$ increases free indices while preserving indices bound
+within $B$. Thus instantiation is $I_0(C,B)$; an outer rigid variable never becomes
+a freshly inferred variable.
+
+Record labels are encoded by their positions in the ordered vocabulary of labels
+occurring in $A$ or $\Delta$. This restriction preserves existence of bounded
+evidence: delete every other label from all types in a witness. This transformation
+leaves the input types unchanged, commutes with substitution and every evidence
+typing rule, and never increases type height or program cost. It introduces no
+new record values or projections into evidence.
+
+\textbf{Constraint construction and validation.} A known implementation type
+determines its initial sequence of eliminations. Interpreting that known structure
+with symbolic type arguments avoids asking SMT to rediscover it. When an inferred
+type becomes the function type, its constructor and the next elimination remain
+symbolic, including possible value application followed by type application.
+This is partial evaluation of the same constraints, not a separate matching algorithm.
+When no earlier spine exists, value application is impossible and its continuation
+is omitted.
+
+Well-formedness and height constraints are enforced by model refinement. An initial
+model is provisional. Every active type-argument position is checked; for each
+violation, the solver receives the general constraint that this position must be
+well formed and within height $H$ whenever it is active. Search then resumes with
+the same spine count. Every added constraint is required by P-Type-App and excludes
+no valid witness. Each position can require this refinement at most once. Evidence
+is decoded only after all these obligations hold. Native solver state belongs to
+one request and is discarded after success or failure.
+
+\textbf{Guarantees and failures.} Induction over the spine order, followed by its
+eliminations, derives $\Pj p A$ for a satisfying, validated model. Conversely, flattening
+each function position in an admissible evidence tree and ordering its argument
+subtrees before their uses yields such a program. Therefore every witness whose
+program cost and type-argument heights meet the bounds is represented by the
+constraints. Solver timeouts or an \emph{unknown} answer may still prevent discovery.
+The resolver independently rechecks the decoded construction and its erased target;
+an SMT model is not a trusted typing derivation.
+
+An unsatisfiable bounded query normally reports \emph{search limit exhausted}, not
+uninhabitability. There are two definite absence cases. Empty $\Delta$ admits no
+evidence leaves. Also, if neither the goal nor any type in $\Delta$ contains $\forall$,
+let $k$ be the number of distinct subtypes of those inputs. Elimination can only
+produce these types. Choose a least-height proof for each inhabited type; its
+dependencies have strictly smaller least heights. There are at most $k$ such
+proofs, and each head spine has at most $k$ nodes. A program of cost at most $k^2$
+therefore suffices whenever any proof exists. Unsatisfiability after covering that
+bound establishes absence. Otherwise exhaustion, solver unknown (including timeout),
+and native/API failures remain distinct outcomes, with the underlying reason preserved.
 
 \subsection*{First-class polymorphic implementations}
 A generic implementation may have the ordinary core type
@@ -588,9 +699,9 @@ Given $r:\kw{Repr}[\kw{Person},\Str]$ and $s:\TS[\Str]$ in $\Delta$, the constru
 \[
  p=i[\kw{Person}][\Str]\{r\}\{s\}
 \]
-satisfies $\Pj p{\TS[\kw{Person}]}$. It is permitted as the result of a stronger synthesizer,
-but the exact-lookup placeholder does not discover it. The source program can construct
-and install it explicitly:
+satisfies $\Pj p{\TS[\kw{Person}]}$. The SMT synthesizer discovers the intermediate type
+$B=\Str$ and this composition; the exact-lookup baseline does not. The source program
+can also construct and install it explicitly:
 \begin{lstlisting}
 impl person: ToString[Person] = via[Person, String](using personName, using string)
 ToString[Person]::toString({ name = "Ada" })
@@ -619,7 +730,7 @@ embedded in one target namespace; freshness prevents capture.
 
 \inferrule*[right=R-Instance]{d:A\in\Delta}{\R d d}
 
-\inferrule*[right=R-Need]{\Delta\vdash_{\mathcal S}A\rightsquigarrow p\\\Pj p A}
+\inferrule*[right=R-Need]{\Gamma;\Delta\vdash_{\mathcal S}A\rightsquigarrow p\\\Pj p A}
  {\R{\hole A}{\erase p}}
 
 

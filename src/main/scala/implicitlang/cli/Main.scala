@@ -5,7 +5,7 @@ import implicitlang.syntax.Expr
 import implicitlang.core.{Term, Elaborated}
 import implicitlang.parser.Parser
 import implicitlang.elaboration.Elaborator
-import implicitlang.synthesis.{Synthesizer, NaiveSynthesizer}
+import implicitlang.synthesis.{Synthesizer, SmtSynthesizer}
 import implicitlang.resolution.Resolver
 import implicitlang.evaluation.{Evaluator, Value}
 
@@ -17,7 +17,7 @@ import scala.util.control.NonFatal
 final case class Compilation(source: Expr, core: Elaborated, target: Term)
 
 object Pipeline {
-  def compile(source: String, synthesizer: Synthesizer = new NaiveSynthesizer): Result[Compilation, Error] = {
+  def compile(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Compilation, Error] = {
     for {
       expression <- new Parser().parse(source)
       checked <- new Elaborator().elaborate(expression)
@@ -25,7 +25,7 @@ object Pipeline {
     } yield Compilation(expression, checked, target)
   }
 
-  def run(source: String, synthesizer: Synthesizer = new NaiveSynthesizer): Result[Value, Error] = {
+  def run(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Value, Error] = {
     compile(source, synthesizer).flatMap(compilation => Evaluator.evaluate(compilation.target))
   }
 }
