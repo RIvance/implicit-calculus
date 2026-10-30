@@ -1,15 +1,19 @@
-package implicitlang
+package implicitlang.diagnostic
 
-import implicitlang.core.{ImplicitTerm, Type}
-
-import implicitlang.util.Result
+import implicitlang.`implicit`.ImplicitTerm
+import implicitlang.core.Type
 
 enum Error {
   case Parse(message: String, line: Int, column: Int)
   case UnknownTerm(name: String)
+  case MissingParameterType(name: String)
   case UnknownType(name: String)
   case DuplicateName(name: String)
-  case AliasArity(name: String, expected: Int, actual: Int)
+  case TypeArity(name: String, expected: Int, actual: Int)
+  case UnknownTrait(name: String)
+  case ExpectedTrait(name: String)
+  case TraitInType(name: String)
+  case RecursiveDefinitionType(name: String, actual: Type)
   case TypeVariableApplied(name: String)
   case ExpectedType(expected: Type, actual: Type)
   case ExpectedFunction(actual: Type)
@@ -24,24 +28,10 @@ enum Error {
   case SynthesisUnknown(goal: Type, reason: String)
   case SynthesisBackend(cause: Throwable)
   case InvalidTypeDepth(depth: Int)
-  case NonCanonicalRecord(labels: Vector[String])
   case InvalidEvidenceForm(expression: ImplicitTerm)
   case InvalidTermIndex(space: String, index: Int)
   case InvalidTypeIndex(index: Int, depth: Int)
   case ImplicitTypeInTarget(tpe: Type)
   case InvalidEvidence(expected: Type, actual: Type)
   case Runtime(message: String)
-}
-
-private[implicitlang] object Check {
-  def distinct(names: Vector[String]): Result[Unit, Error] = {
-    names.groupBy(identity).collectFirst { case (name, occurrences) if occurrences.size > 1 => name } match {
-      case Some(name) => Result.Err(Error.DuplicateName(name))
-      case None => Result.Ok(())
-    }
-  }
-
-  def same(expected: Type, actual: Type): Result[Unit, Error] = {
-    if expected == actual then Result.Ok(()) else Result.Err(Error.ExpectedType(expected, actual))
-  }
 }

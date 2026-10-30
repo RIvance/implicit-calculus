@@ -1,7 +1,7 @@
 // error: MissingInstance(BoolType)
 
 let number: Int = 21
-impl positive: Int -> Bool = (value: Int) => value > 0
+given positive: Int -> Bool = (value: Int) => value > 0
 
 // An ordinary let binding does not supply a prerequisite to implicit search.
 summon[Bool]

@@ -1,28 +1,25 @@
 package implicitlang.cli
 
-import implicitlang.Error
-import implicitlang.syntax.Expr
-import implicitlang.core.{Term, Elaborated}
-import implicitlang.parser.Parser
-import implicitlang.elaboration.Elaborator
-import implicitlang.synthesis.{Synthesizer, SmtSynthesizer}
+import implicitlang.`implicit`.Elaborated
+import implicitlang.core.{Term, Evaluator, Value}
+import implicitlang.diagnostic.Error
 import implicitlang.resolution.Resolver
-import implicitlang.evaluation.{Evaluator, Value}
-
+import implicitlang.surface.{Program, Parser, Elaborator}
+import implicitlang.synthesis.{Synthesizer, SmtSynthesizer}
 import implicitlang.util.Result
 
 import java.nio.file.{Files, Path}
 import scala.util.control.NonFatal
 
-final case class Compilation(source: Expr, core: Elaborated, target: Term)
+final case class Compilation(source: Program, core: Elaborated, target: Term)
 
 object Pipeline {
   def compile(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Compilation, Error] = {
     for {
-      expression <- new Parser().parse(source)
-      checked <- new Elaborator().elaborate(expression)
+      program <- new Parser().parse(source)
+      checked <- new Elaborator().elaborate(program)
       target <- new Resolver(synthesizer).resolve(checked)
-    } yield Compilation(expression, checked, target)
+    } yield Compilation(program, checked, target)
   }
 
   def run(source: String, synthesizer: Synthesizer = new SmtSynthesizer): Result[Value, Error] = {

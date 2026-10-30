@@ -1,0 +1,6 @@
+// error: ExpectedTrait(Printer)
+
+type Printer[A] = { show: A -> String }
+
+def display[A where Printer[A]](value: A): String = value.show
+display

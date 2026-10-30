@@ -1,0 +1,14 @@
+// result: {number = 21, text = Ada}
+
+trait Identity[A] = { identity: A -> A }
+
+implement[A] Identity[A] = { identity = (value: A) => value }
+
+def run[A where Identity[A]](step: (A -> A) -> A): A = {
+  step((value: A) => run[A]((ignored: A -> A) => Identity[A]::identity(value)))
+}
+
+{
+  number = run[Int]((again: Int -> Int) => again(21))
+  text = run[String]((again: String -> String) => again("Ada"))
+}

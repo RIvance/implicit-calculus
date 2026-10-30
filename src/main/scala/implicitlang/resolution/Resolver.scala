@@ -1,9 +1,9 @@
 package implicitlang.resolution
 
-import implicitlang.{Check, Error}
-import implicitlang.core.{Type, ImplicitTerm, Term, Elaborated}
+import implicitlang.`implicit`.{ImplicitTerm, Elaborated}
+import implicitlang.core.{Type, Term, TypeChecker}
+import implicitlang.diagnostic.Error
 import implicitlang.synthesis.{Synthesizer, SynthesisContext}
-
 import implicitlang.util.Result
 
 /** Fill goals and merge the two lexical variable spaces into the ordinary target environment. */
@@ -45,8 +45,7 @@ final class Resolver(synthesizer: Synthesizer) {
   def resolve(checked: Elaborated): Result[Term, Error] = {
     for {
       term <- resolve(checked.expression, Context())
-      actual <- term.infer()
-      _ <- Check.same(checked.tpe.erased, actual)
+      _ <- TypeChecker.check(term, checked.tpe.erased)
     } yield term
   }
 
@@ -62,6 +61,14 @@ final class Resolver(synthesizer: Synthesizer) {
     case ImplicitTerm.Instance(index) => lookup(context.instances, index, "Δ")
     case ImplicitTerm.Lam(annotation, body) => {
       resolve(body, context.bindOrdinary(annotation)).map(Term.Lam(annotation.erased, _))
+    }
+    /*
+     * Γ, x:A; Δ ⊢ c ⟹ t
+     * ─────────────────────────── R-Fix
+     * Γ; Δ ⊢ fix x:A.c ⟹ fix x:|A|.t
+     */
+    case ImplicitTerm.Fix(annotation, body) => {
+      resolve(body, context.bindOrdinary(annotation)).map(Term.Fix(annotation.erased, _))
     }
     case ImplicitTerm.ImplicitLam(annotation, body) => {
       resolve(body, context.bindInstance(annotation)).map(Term.Lam(annotation.erased, _))
@@ -97,15 +104,14 @@ final class Resolver(synthesizer: Synthesizer) {
         construction <- synthesizer.synthesize(goal, SynthesisContext(context.instances.map(_.tpe), context.typeDepth))
         evidence <- checkEvidence(construction, context)
         _ <- if evidence.tpe == goal then Result.Ok(()) else Result.Err(Error.InvalidEvidence(goal, evidence.tpe))
-        actual <- evidence.term.infer(context.targetTypes, context.typeDepth)
-        _ <- Check.same(goal.erased, actual)
+        _ <- TypeChecker.check(evidence.term, goal.erased, context.targetTypes, context.typeDepth)
       } yield evidence.term
     }
     case ImplicitTerm.IntLit(value) => Result.Ok(Term.IntLit(value))
     case ImplicitTerm.StringLit(value) => Result.Ok(Term.StringLit(value))
     case ImplicitTerm.BoolLit(value) => Result.Ok(Term.BoolLit(value))
     case ImplicitTerm.Record(fields) => {
-      Result.traverse(fields) { case (label, value) => resolve(value, context).map(label -> _) }.map(Term.Record.apply)
+      Result.traverse(fields)(resolve(_, context)).map(Term.Record.apply)
     }
     case ImplicitTerm.Proj(record, label) => resolve(record, context).map(Term.Proj(_, label))
     case ImplicitTerm.BinOp(kind, left, right) => {
@@ -157,7 +163,8 @@ final class Resolver(synthesizer: Synthesizer) {
         case (false, other) => Result.Err(Error.ExpectedFunction(other))
         case (true, other) => Result.Err(Error.ExpectedImplicitFunction(other))
       }
-      _ <- Check.same(signature._1, actual.tpe)
+      _ <- if signature._1 == actual.tpe then Result.Ok(())
+        else Result.Err(Error.ExpectedType(signature._1, actual.tpe))
     } yield Instance(signature._2, Term.App(producer.term, actual.term))
   }
 

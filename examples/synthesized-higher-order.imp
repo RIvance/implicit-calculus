@@ -1,6 +1,6 @@
 // result: 21
 
-impl identity[A]: A -> A = (value: A) => value
+instance identity[A]: A -> A = (value: A) => value
 
 // The inferred type argument is itself a function type.
 let preserve = summon[(Int -> Int) -> (Int -> Int)]

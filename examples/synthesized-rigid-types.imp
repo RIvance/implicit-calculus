@@ -1,6 +1,6 @@
 // result: {number = 21, text = Ada}
 
-impl first[A, B]: A -> B -> A = (a: A, b: B) => a
+instance first[A, B]: A -> B -> A = (a: A, b: B) => a
 
 def keep[T](value: T): T = {
   // T remains fixed while the synthesized function retains its own B binder.

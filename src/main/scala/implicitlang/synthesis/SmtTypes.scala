@@ -1,7 +1,8 @@
 package implicitlang.synthesis
 
-import com.microsoft.z3.{BoolExpr, BoolSort, Constructor, Context, DatatypeSort, Expr, IntSort, Sort}
 import implicitlang.core.Type
+
+import com.microsoft.z3.{BoolExpr, BoolSort, Constructor, Context, DatatypeSort, Expr, IntSort, Sort}
 
 /** Per-query encoding. No Z3 expressions or native resources escape the enclosing synthesis request. */
 private[synthesis] final class SmtTypes(context: Context, labels: Vector[String]) {
@@ -196,11 +197,15 @@ private[synthesis] final class SmtTypes(context: Context, labels: Vector[String]
       case Type.Arrow(parameter, result) => explicit(loop(parameter, depth), loop(result, depth))
       case Type.Implicit(parameter, result) => implicitFunction(loop(parameter, depth), loop(result, depth))
       case Type.Forall(body) => build(forall, loop(body, depth + 1))
-      case Type.Record(fields) => build(record, fields.foldRight(build(empty)) { case ((label, tpe), tail) =>
-        val index = labels.indexOf(label)
-        require(index >= 0, s"Record label outside this query's vocabulary: $label")
-        build(field, context.mkInt(index), loop(tpe, depth), tail)
-      })
+      // Canonical serialization makes SMT datatype equality coincide with unordered map equality.
+      case Type.Record(fields) => {
+        val encoded = fields.toVector.sortBy(_._1).foldRight(build(empty)) { case ((label, tpe), tail) =>
+          val index = labels.indexOf(label)
+          require(index >= 0, s"Record label outside this query's vocabulary: $label")
+          build(field, context.mkInt(index), loop(tpe, depth), tail)
+        }
+        build(record, encoded)
+      }
     }
     loop(tpe, 0)
   }
@@ -220,12 +225,12 @@ private[synthesis] final class SmtTypes(context: Context, labels: Vector[String]
     else throw new IllegalStateException("Z3 returned a value outside the type datatype")
   }
 
-  private def decodeFields(value: Expr[?]): Vector[(String, Type)] = {
-    if value.getFuncDecl == empty.ConstructorDecl() then Vector.empty
+  private def decodeFields(value: Expr[?]): Map[String, Type] = {
+    if value.getFuncDecl == empty.ConstructorDecl() then Map.empty
     else if value.getFuncDecl == field.ConstructorDecl() then {
       val arguments = value.getArgs
       val label = labels(integerValue(arguments(0)))
-      (label -> decode(arguments(1))) +: decodeFields(arguments(2))
+      decodeFields(arguments(2)).updated(label, decode(arguments(1)))
     } else throw new IllegalStateException("Z3 returned a value outside the record-field datatype")
   }
 

@@ -2,15 +2,15 @@
 
 type Box[A] = { value: A }
 
-impl box[A where A]: Box[A] = { value = summon[A] }
+instance box[A]: A ~> Box[A] = (implicit value: A) => { value = value }
 
 let first = {
-  impl String = "Ada"
+  given text: String = "Ada"
   summon[Box[String]].value
 }
 
 let second = {
-  impl String = "Grace"
+  given text: String = "Grace"
   summon[Box[String]].value
 }
 

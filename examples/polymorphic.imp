@@ -1,22 +1,24 @@
 // result: Ada
 
-trait ToString[A] = { toString: A -> String }
-trait Repr[A, B] = { repr: A -> B }
+type Printer[A] = { toString: A -> String }
+type Conversion[A, B] = { repr: A -> B }
+trait ToString[A] = Printer[A]
+trait Repr[A, B] = Conversion[A, B]
 type Person = { name: String }
 
-impl string: ToString[String] = {
+instance string: Printer[String] = {
   toString = (text: String) => text
 }
 
-impl personName: Repr[Person, String] = {
+instance personName: Conversion[Person, String] = {
   repr = (person: Person) => person.name
 }
 
-impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] = {
+instance via[A, B where Repr[A, B] and ToString[B]]: Printer[A] = {
   toString = (x: A) => ToString[B]::toString(Repr[A, B]::repr(x))
 }
 
 // The producer is a first-class value. Supply its type and implementation arguments explicitly.
-impl person: ToString[Person] = via[Person, String](using personName, using string)
+instance person: Printer[Person] = via[Person, String](using personName, using string)
 
 ToString[Person]::toString({ name = "Ada" })

@@ -1,10 +1,12 @@
 package implicitlang.synthesis
 
+import implicitlang.`implicit`.ImplicitTerm
+import implicitlang.core.Type
+import implicitlang.diagnostic.Error
+import implicitlang.util.Result
+
 import com.microsoft.z3.{BoolExpr, Constructor, Context, DatatypeSort, Expr, IntNum, IntSort, Model, Sort, Status}
 import com.microsoft.z3.Z3Exception
-import implicitlang.Error
-import implicitlang.core.{ImplicitTerm, Type}
-import implicitlang.util.Result
 
 /** Bounds on the total size of a spine program and the height of its inferred type arguments. */
 final case class SynthesisLimits(maximumSteps: Int = 16, maximumTypeDepth: Int = 8, timeoutMillis: Int = 10000) {
@@ -35,7 +37,7 @@ final class SmtSynthesizer(val limits: SynthesisLimits = SynthesisLimits()) exte
     else if context.instances.isEmpty then Result.Err(Error.MissingInstance(goal))
     else {
       val inputTypes = (goal +: context.instances.toVector).flatMap(subtypes)
-      val labels = inputTypes.collect { case Type.Record(fields) => fields.map(_._1) }.flatten.distinct.sorted
+      val labels = inputTypes.collect { case Type.Record(fields) => fields.keys }.flatten.distinct.sorted
       // In the ∀-free fragment, each proof type is a subtype of Δ. Choose a least-height
       // proof for each inhabited type: its dependencies have smaller heights. There are at
       // most k such proofs, each with a head spine of at most k nodes, hence cost at most k².
@@ -59,7 +61,7 @@ final class SmtSynthesizer(val limits: SynthesisLimits = SynthesisLimits()) exte
     case Type.Arrow(parameter, result) => subtypes(parameter) ++ subtypes(result)
     case Type.Implicit(parameter, result) => subtypes(parameter) ++ subtypes(result)
     case Type.Forall(body) => subtypes(body)
-    case Type.Record(fields) => fields.flatMap(field => subtypes(field._2))
+    case Type.Record(fields) => fields.values.toVector.flatMap(subtypes)
     case _ => Vector.empty
   })
 }

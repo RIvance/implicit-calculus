@@ -1,8 +1,8 @@
 package implicitlang.synthesis
 
-import implicitlang.Error
-import implicitlang.core.{Type, ImplicitTerm}
-
+import implicitlang.`implicit`.ImplicitTerm
+import implicitlang.core.Type
+import implicitlang.diagnostic.Error
 import implicitlang.util.Result
 
 /** Nearest-first Δ types. Type variables 0 .. typeDepth-1 are rigid, not solver metavariables. */

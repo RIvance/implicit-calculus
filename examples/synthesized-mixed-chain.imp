@@ -2,9 +2,9 @@
 
 type Counted[A] = { value: A, count: Int }
 
-impl text: String = "Ada"
-impl count: Int = 21
-impl counted[A]: A -> (Int ~> Counted[A]) = (value: A, implicit count: Int) => {
+instance text: String = "Ada"
+instance count: Int = 21
+instance counted[A](value: A, implicit count: Int): Counted[A] = {
   value = value
   count = count
 }

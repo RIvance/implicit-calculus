@@ -1,0 +1,14 @@
+// result: {first = 21, second = Ada}
+
+trait Default[A] = { value: A }
+trait Pair[A, B] = { first: A, second: B }
+
+implement[A, B where Default[A] and Default[B]] Pair[A, B] = {
+  first = Default[A]::value
+  second = Default[B]::value
+}
+
+// Explicit dictionary values use ordinary record types.
+summon[forall A, B. { value: A } ~> { value: B } ~> { first: A, second: B }][Int, String](
+  using { value = 21 }, using { value = "Ada" }
+)

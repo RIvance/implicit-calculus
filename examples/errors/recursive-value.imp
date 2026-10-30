@@ -1,0 +1,4 @@
+// error: RecursiveDefinitionType(x,IntType)
+
+def x: Int = x
+x

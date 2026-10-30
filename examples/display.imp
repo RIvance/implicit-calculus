@@ -9,11 +9,11 @@ type Student = {
   age: Int
 }
 
-impl ToString[String] = {
+implement ToString[String] = {
   toString = (text: String) => text
 }
 
-impl student: ToString[Student] = {
+implement ToString[Student] = {
   toString = (s: Student) =>
     "Student(" ++ ToString[String]::toString(s.name) ++ ")"
 }

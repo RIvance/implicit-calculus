@@ -1,0 +1,4 @@
+// error: MissingParameterType(x)
+
+let identity = x => x
+identity(21)

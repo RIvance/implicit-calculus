@@ -5,7 +5,7 @@ type Box[A] = { value: A }
 // The outer braces group local bindings; the inner field assignment builds a record.
 let box: Box[Int] = {
   let seed: Int = 20
-  impl Int = seed + 1
+  given chosen: Int = seed + 1
   { value = summon[Int] }
 }
 

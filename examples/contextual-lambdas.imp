@@ -1,0 +1,18 @@
+// result: {local = 21, mapped = 21, passed = 21, text = Ada}
+
+trait Map[A, B] = { map: A -> B }
+
+implement Map[Int, Int] = { map = x => x + 1 }
+
+def apply(f: Int -> Int, value: Int): Int = f(value)
+
+let add: Int -> Int -> Int = (x: Int, y) => x + y
+let identity: forall A. A -> A = [A] => x => x
+given step: Int -> Int = x => add(x, 1)
+
+{
+  local = summon[Int -> Int](20),
+  mapped = Map[Int, Int]::map(20),
+  passed = apply(x => x + 1, 20),
+  text = identity[String]("Ada")
+}

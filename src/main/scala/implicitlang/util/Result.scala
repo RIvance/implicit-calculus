@@ -21,6 +21,12 @@ enum Result[+T, +E] {
 }
 
 object Result {
+  def traverse[K, A, B, E](values: Map[K, A])(function: A => Result[B, E]): Result[Map[K, B], E] = {
+    values.foldLeft[Result[Map[K, B], E]](Ok(Map.empty)) { case (accumulated, (key, value)) =>
+      accumulated.flatMap(items => function(value).map(result => items.updated(key, result)))
+    }
+  }
+
   def traverse[A, B, E](values: Vector[A])(function: A => Result[B, E]): Result[Vector[B], E] = {
     values.foldLeft[Result[Vector[B], E]](Ok(Vector.empty)) { (accumulated, value) =>
       accumulated.flatMap(items => function(value).map(items :+ _))

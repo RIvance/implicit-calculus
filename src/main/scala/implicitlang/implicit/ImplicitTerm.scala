@@ -1,6 +1,6 @@
-package implicitlang.core
+package implicitlang.`implicit`
 
-import implicitlang.syntax.OpKind
+import implicitlang.core.{Type, OpKind}
 
 /** Two independent de Bruijn spaces: Var indexes Γ, Instance indexes Δ. */
 enum ImplicitTerm {
@@ -13,12 +13,13 @@ enum ImplicitTerm {
   case TypeLam(body: ImplicitTerm)
   case TypeApp(function: ImplicitTerm, argument: Type)
   case Let(valueType: Type, value: ImplicitTerm, body: ImplicitTerm)
+  case Fix(valueType: Type, body: ImplicitTerm)
   case Impl(valueType: Type, value: ImplicitTerm, body: ImplicitTerm)
   case Need(goal: Type)
   case IntLit(value: BigInt)
   case StringLit(value: String)
   case BoolLit(value: Boolean)
-  case Record(fields: Vector[(String, ImplicitTerm)])
+  case Record(fields: Map[String, ImplicitTerm])
   case Proj(record: ImplicitTerm, label: String)
   case BinOp(kind: OpKind, left: ImplicitTerm, right: ImplicitTerm)
 }

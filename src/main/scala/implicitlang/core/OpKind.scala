@@ -1,6 +1,4 @@
-package implicitlang.syntax
-
-import implicitlang.core.Type
+package implicitlang.core
 
 /** Primitive operations have fixed operand and result types. */
 enum OpKind {

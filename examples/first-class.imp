@@ -1,16 +1,16 @@
 // result: value = Ada
 
-trait ToString[A] = { toString: A -> String }
+type Printer[A] = { toString: A -> String }
+trait ToString[A] = Printer[A]
 
-def makePrinter(prefix: String): ToString[String] = {
+def makePrinter(prefix: String): Printer[String] = {
   toString = (text: String) => prefix ++ text
 }
 
-let printer = makePrinter("value = ")
-
-def install(chosen: ToString[String]): String = {
-  impl active: ToString[String] = chosen
+def install(chosen: Printer[String]): String = {
+  given active: Printer[String] = chosen
   ToString[String]::toString("Ada")
 }
 
+let printer = makePrinter("value = ")
 install(printer)

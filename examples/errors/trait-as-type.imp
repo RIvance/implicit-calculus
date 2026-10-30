@@ -1,0 +1,6 @@
+// error: TraitInType(Show)
+
+trait Show[A] = { show: A -> String }
+
+let printer: Show[String] = { show = (text: String) => text }
+printer

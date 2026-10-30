@@ -1,13 +1,11 @@
 package implicitlang
 
-import implicitlang.syntax.{Expr, TypeExpr, OpKind}
-import implicitlang.core.{ImplicitTerm, Type, Term, Elaborated}
-import implicitlang.parser.Parser
-import implicitlang.elaboration.Elaborator
-import implicitlang.synthesis.{Synthesizer, SynthesisContext, NaiveSynthesizer, SmtSynthesizer, SynthesisLimits}
+import implicitlang.`implicit`.{ImplicitTerm, Elaborated}
 import implicitlang.cli.Pipeline
-import implicitlang.evaluation.Value
-
+import implicitlang.core.{Type, Term, OpKind, Value, Evaluator, TypeChecker}
+import implicitlang.diagnostic.Error
+import implicitlang.surface.{SurfaceExpr, SurfaceType, Program, Declaration, Parser, Elaborator}
+import implicitlang.synthesis.{Synthesizer, SynthesisContext, NaiveSynthesizer, SmtSynthesizer, SynthesisLimits}
 import implicitlang.util.Result
 
 import java.nio.file.{Files, Path}
@@ -46,7 +44,12 @@ object CalculusTests {
 
   private def run(source: String): Value = success(Pipeline.run(source))
 
-  private def parse(source: String): Expr = success(new Parser().parse(source))
+  private def parse(source: String): Program = success(new Parser().parse(source))
+
+  private def expression(source: String): SurfaceExpr = parse(source) match {
+    case Program(Vector(), body) => body
+    case other => throw new AssertionError(s"Expected an expression without top-level declarations: $other")
+  }
 
   private def testExamples(directory: Path): Unit = {
     val paths = Using.resource(Files.walk(directory)) { stream =>
@@ -89,17 +92,113 @@ object CalculusTests {
       assert(run("((a: Int, b: Int) => a + b) 20 1") == Value.Integer(21))
     }
 
+    test("ordinary lambda annotations are optional in bare grouped and mixed parameter syntax") {
+      val identity = SurfaceExpr.Lam("x", None, SurfaceExpr.Var("x"))
+      Vector("x => x", "(x) => x", "{ x => x }").foreach(source => assert(expression(source) == identity))
+      assert(parse("(x, y) => x") == parse("x => y => x"))
+      assert(parse("(x: Int, y) => y") == parse("(x: Int) => y => y"))
+      assert(parse("(x)(implicit y: Int, z) => z") == parse("x => (implicit y: Int) => z => z"))
+      Vector("(implicit x) => x", "def f(x): Int = x in 0", "instance f(x): Int = x in 0").foreach { source =>
+        expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
+      }
+    }
+
+    test("ascriptions and evidence annotations provide expected lambda types") {
+      Vector(
+        "let add: Int -> Int -> Int = (x, y) => x + y in add(20, 1)",
+        "let add: Int -> Int -> Int = (x: Int, y) => x + y in add(20, 1)",
+        "let add = ((x, y) => x + y): Int -> Int -> Int in add(20, 1)",
+        "given add: Int -> Int -> Int = (x, y) => x + y in add(20, 1)",
+        "given id: forall A. A -> A = [A] => x => x in id[Int](21)",
+        "instance id[A]: A -> A = x => x in id[Int](21)",
+        "def id: Int -> Int = x => x in id(21)"
+      ).foreach(source => assert(run(source) == Value.Integer(21)))
+    }
+
+    test("ordinary and implicit applications check lambda arguments against parameter types") {
+      Vector(
+        "def apply(f: Int -> Int): Int = f(20) in apply(x => x + 1)",
+        "def apply(implicit f: Int -> Int): Int = f(20) in apply(using x => x + 1)",
+        "def apply(f: forall A. A -> A): Int = f[Int](21) in apply([A] => x => x)",
+        "def apply(f: Int -> Int -> Int): Int = f(20, 1) in apply((x: Int, y) => x + y)"
+      ).foreach(source => assert(run(source) == Value.Integer(21)))
+    }
+
+    test("expected types flow through bindings type abstractions and record fields") {
+      val source = """
+        |type Functions[A] = { identity: A -> A, keep: A -> (Int ~> A) }
+        |let functions: forall A. Functions[A] = [A] => {
+        |  let seed = 0
+        |  given offset: Int = seed
+        |  { identity = x => x, keep = x => (implicit ignored: Int) => x }
+        |}
+        |functions[Int].identity(functions[Int].keep(21)(using 0))
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+      val implementation = "trait Step[A] = { step: A -> A } in " +
+        "implement[A] Step[A] = { step = x => x } in Step[Int]::step(21)"
+      assert(run(implementation) == Value.Integer(21))
+      assert(run("let f: Int ~> Int -> Int = (implicit x: Int) => y => x + y in f(using 20)(1)") ==
+        Value.Integer(21))
+      Vector(
+        "let r: { run: Int -> Int, flag: Bool } = { run = x => x } in r",
+        "let r: { run: Int -> Int } = { run = x => x, extra = 0 } in r"
+      ).foreach { source =>
+        expectFailure(Pipeline.compile(source)) {
+          case Error.ExpectedType(Type.Record(expected), Type.Record(actual)) => expected.keySet != actual.keySet
+          case _ => false
+        }
+      }
+    }
+
+    test("recursive definitions check unannotated lambdas against the declared signature") {
+      val source = "def run: ((Int -> Int) -> Int) -> Int = " +
+        "step => step(value => run(ignored => value)) in run(again => again(21))"
+      assert(run(source) == Value.Integer(21))
+    }
+
+    test("unannotated lambdas require an expected function type rather than inference from use") {
+      Vector("x => x", "x => x + 1", "let id = x => x in id(21)").foreach { source =>
+        expectFailure(Pipeline.compile(source)) { case Error.MissingParameterType("x") => true; case _ => false }
+      }
+      expectFailure(Pipeline.compile("let f: Int -> Int = (x: String) => 21 in f")) {
+        case Error.ExpectedType(Type.IntType, Type.StringType) => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("let f: Int -> Int = x => true in f")) {
+        case Error.ExpectedType(Type.IntType, Type.BoolType) => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("let f: Int ~> Int = x => x in f")) {
+        case Error.ExpectedFunction(Type.Implicit(Type.IntType, Type.IntType)) => true
+        case _ => false
+      }
+    }
+
+    test("program elaboration checks externally supplied expected types and validates their scope") {
+      val program = parse("type Number = Int in x => x")
+      val expected = Type.Arrow(Type.IntType, Type.IntType)
+      val checked = success(new Elaborator().elaborate(program, Some(expected)))
+      assert(checked == Elaborated(ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Var(0)), expected))
+      expectFailure(new Elaborator().elaborate(program, Some(Type.Arrow(Type.Variable(0), Type.Variable(0))))) {
+        case Error.InvalidTypeIndex(0, 0) => true
+        case _ => false
+      }
+    }
+
     test("mixed lambda parameters preserve each binder kind and their source order") {
-      val expected = Expr.Lam(
+      val expected = SurfaceExpr.Lam(
         "a",
-        TypeExpr.IntType,
-        Expr.ImplicitLam("b", TypeExpr.StringType, Expr.Lam("c", TypeExpr.BoolType, Expr.Var("b")))
+        Some(SurfaceType.IntType),
+        SurfaceExpr.ImplicitLam(
+          "b", SurfaceType.StringType, SurfaceExpr.Lam("c", Some(SurfaceType.BoolType), SurfaceExpr.Var("b"))
+        )
       )
       Vector(
         "(a: Int, implicit b: String, c: Bool) => b",
         "(a: Int)(implicit b: String)(c: Bool) => b",
         "(a: Int) => (implicit b: String) => (c: Bool) => b"
-      ).foreach(source => assert(parse(source) == expected))
+      ).foreach(source => assert(expression(source) == expected))
       val compilation = success(Pipeline.compile("(a: Int, implicit b: String, c: Bool) => b"))
       assert(compilation.core.tpe == Type.Arrow(
         Type.IntType,
@@ -111,7 +210,7 @@ object CalculusTests {
       val definition = "def choose[T](a: T, implicit b: T, c: T): T = b"
       val curried = "def choose [T] (a: T) (implicit b: T) (c: T): T = b"
       assert(parse(s"$definition in choose") == parse(s"$curried in choose"))
-      val prefix = s"$definition\nimpl selected: Int = 21\n"
+      val prefix = s"$definition\ninstance selected: Int = 21\n"
       assert(run(prefix + "choose[Int](1, 99)") == Value.Integer(21))
       assert(run(prefix + "choose[Int] 1 99") == Value.Integer(21))
       assert(run(prefix + "choose[Int](1)(using 42)(99)") == Value.Integer(42))
@@ -131,8 +230,9 @@ object CalculusTests {
 
     test("where constraints and mixed parameter groups compose in declaration order") {
       val source = """
-        |def choose[T where T](ignored: T, implicit selected: T)(last: T): T = summon[T]
-        |impl fallback: Int = 21
+        |trait Default[T] = { value: T }
+        |def choose[T where Default[T]](ignored: T, implicit selected: T)(last: T): T = summon[T]
+        |implement Default[Int] = { value = 21 }
         |choose[Int](0)(using 42)(1)
         |""".stripMargin
       assert(run(source) == Value.Integer(42))
@@ -148,11 +248,11 @@ object CalculusTests {
     test("implicit type arrows use tilde while lambda bodies retain equals arrows") {
       val source = "let identity: Int ~> Int = (implicit x: Int) => x in identity(using 21)"
       assert(run(source) == Value.Integer(21))
-      val expected = TypeExpr.Arrow(
-        TypeExpr.IntType,
-        TypeExpr.Implicit(TypeExpr.StringType, TypeExpr.Arrow(TypeExpr.BoolType, TypeExpr.IntType))
+      val expected = SurfaceType.Arrow(
+        SurfaceType.IntType,
+        SurfaceType.Implicit(SurfaceType.StringType, SurfaceType.Arrow(SurfaceType.BoolType, SurfaceType.IntType))
       )
-      assert(parse("f: Int -> String ~> Bool -> Int") == Expr.Ascribe(Expr.Var("f"), expected))
+      assert(expression("f: Int -> String ~> Bool -> Int") == SurfaceExpr.Ascribe(SurfaceExpr.Var("f"), expected))
       assert(
         Type.Implicit(Type.IntType, Type.Arrow(Type.StringType, Type.BoolType)).show == "(Int ~> (String -> Bool))"
       )
@@ -161,7 +261,7 @@ object CalculusTests {
       }
     }
 
-    test("lambda syntax needs no fun keyword and record literals remain unambiguous") {
+    test("lambda parameters and record literals remain unambiguous") {
       assert(run("([A, B] => (a: A, implicit b: B) => a)[Int, String](21)(using \"evidence\")") == Value.Integer(21))
       assert(run("let fun = 21 in fun") == Value.Integer(21))
       assert(run("((implicitValue: Int) => implicitValue) 21") == Value.Integer(21))
@@ -178,30 +278,30 @@ object CalculusTests {
     }
 
     test("ordinary argument lists and whitespace applications associate to the left") {
-      val expected = Expr.App(Expr.App(Expr.Var("f"), Expr.Var("a")), Expr.Var("b"))
+      val expected = SurfaceExpr.App(SurfaceExpr.App(SurfaceExpr.Var("f"), SurfaceExpr.Var("a")), SurfaceExpr.Var("b"))
       Vector("f(a, b)", "f(a)(b)", "f a b", "f (a, b)", "f(a) b", "f a (b)", "f (a) (b)").foreach { source =>
-        assert(parse(source) == expected)
+        assert(expression(source) == expected)
       }
-      assert(parse("f [Int] a b") == parse("f[Int](a, b)"))
-      assert(parse("f(using d) a b") == parse("f(using d)(a, b)"))
+      assert(expression("f [Int] a b") == expression("f[Int](a, b)"))
+      assert(expression("f(using d) a b") == expression("f(using d)(a, b)"))
     }
 
     test("brace blocks and parentheses produce the same expression AST") {
       Vector("21", "1 + 2 * 3", "let x = 20 in x + 1", "let x = 20\nx + 1", "(x: Int) => x", "{ value = 21 }")
         .foreach { body =>
-          assert(parse(s"{ $body }") == parse(s"($body)"))
+          assert(expression(s"{ $body }") == expression(s"($body)"))
         }
-      assert(parse("{ { { 21 } } }") == Expr.IntLit(21))
+      assert(expression("{ { { 21 } } }") == SurfaceExpr.IntLit(21))
       assert(run("{ 1 + 2 } * 3") == Value.Integer(9))
     }
 
     test("brace arguments are ordinary applications including when adjacent to the function") {
-      val expected = Expr.App(Expr.Var("f"), Expr.Var("value"))
+      val expected = SurfaceExpr.App(SurfaceExpr.Var("f"), SurfaceExpr.Var("value"))
       Vector("f(value)", "f { value }", "f{value}", "f({ value })").foreach { source =>
-        assert(parse(source) == expected)
+        assert(expression(source) == expected)
       }
-      assert(parse("f a { b }") == parse("f a (b)"))
-      assert(parse("f a{b}") == parse("f a(b)"))
+      assert(expression("f a { b }") == expression("f a (b)"))
+      assert(expression("f a{b}") == expression("f a(b)"))
       assert(run("def f(x: Int): Int = x + 1 in f { let value = 20\nvalue }") == Value.Integer(21))
       assert(run("def f(x: Int): Int = x + 1 in f{20}") == Value.Integer(21))
     }
@@ -213,7 +313,7 @@ object CalculusTests {
       }
       assert(run("def get(r: { value: Int }): Int = r.value in get{value = 21}") == Value.Integer(21))
       assert(run("{ let r = { value = 21 }\nr }.value") == Value.Integer(21))
-      assert(run("{}") == Value.Record(Vector.empty))
+      assert(run("{}") == Value.Record(Map.empty))
     }
 
     test("brace blocks preserve expression scope without introducing a statement language") {
@@ -221,13 +321,13 @@ object CalculusTests {
         |let x = 1
         |let y = {
         |  let x = 20
-        |  impl chosen: Int = x + 1
+        |  given chosen: Int = x + 1
         |  summon[Int]
         |}
         |x + y
         |""".stripMargin
       assert(run(source) == Value.Integer(22))
-      expectFailure(Pipeline.compile("let result = { impl chosen: Int = 21\nsummon[Int] }\nsummon[Int]")) {
+      expectFailure(Pipeline.compile("let result = { given chosen: Int = 21\nsummon[Int] }\nsummon[Int]")) {
         case Error.MissingInstance(Type.IntType) => true
         case _ => false
       }
@@ -237,14 +337,16 @@ object CalculusTests {
     }
 
     test("using marks each explicit implicit argument independently") {
-      val expected = Expr.App(
-        Expr.ImplicitApp(Expr.App(Expr.Var("f"), Expr.Var("a")), Expr.Var("b")),
-        Expr.Var("c")
+      val expected = SurfaceExpr.App(
+        SurfaceExpr.ImplicitApp(SurfaceExpr.App(SurfaceExpr.Var("f"), SurfaceExpr.Var("a")), SurfaceExpr.Var("b")),
+        SurfaceExpr.Var("c")
       )
-      assert(parse("f(a, using b, c)") == expected)
-      assert(parse("f(a)(using b)(c)") == expected)
-      assert(parse("f(using a, b)") == Expr.App(Expr.ImplicitApp(Expr.Var("f"), Expr.Var("a")), Expr.Var("b")))
-      assert(parse("f(using a, using b)") == parse("f(using a)(using b)"))
+      assert(expression("f(a, using b, c)") == expected)
+      assert(expression("f(a)(using b)(c)") == expected)
+      assert(expression("f(using a, b)") == SurfaceExpr.App(
+        SurfaceExpr.ImplicitApp(SurfaceExpr.Var("f"), SurfaceExpr.Var("a")), SurfaceExpr.Var("b")
+      ))
+      assert(expression("f(using a, using b)") == expression("f(using a)(using b)"))
       assert(run("def f(a: Int, implicit b: Int, c: Int): Int = a + b + c in f(1, using 20, 100)") ==
         Value.Integer(121))
       assert(run("def f(implicit a: Int, b: Int, implicit c: Int): Int = a + b + c in f(using 1, 2, using 3)") ==
@@ -253,7 +355,7 @@ object CalculusTests {
 
     test("using arguments can contain brace blocks and explicitly override available evidence") {
       val source = """
-        |impl fallback: Int = 99
+        |instance fallback: Int = 99
         |let identity = (implicit x: Int) => x
         |identity(
         |  using {
@@ -279,10 +381,18 @@ object CalculusTests {
     }
 
     test("postfix operations bind inside whitespace arguments and application precedes arithmetic") {
-      assert(parse("f a.field") == Expr.App(Expr.Var("f"), Expr.Select(Expr.Var("a"), "field")))
-      assert(parse("f g(x)") == Expr.App(Expr.Var("f"), Expr.App(Expr.Var("g"), Expr.Var("x"))))
-      assert(parse("f g (x)") == Expr.App(Expr.App(Expr.Var("f"), Expr.Var("g")), Expr.Var("x")))
-      assert(parse("f g[Int]") == Expr.App(Expr.Var("f"), Expr.TypeApp(Expr.Var("g"), TypeExpr.IntType)))
+      assert(expression("f a.field") == SurfaceExpr.App(
+        SurfaceExpr.Var("f"), SurfaceExpr.Select(SurfaceExpr.Var("a"), "field")
+      ))
+      assert(expression("f g(x)") == SurfaceExpr.App(
+        SurfaceExpr.Var("f"), SurfaceExpr.App(SurfaceExpr.Var("g"), SurfaceExpr.Var("x"))
+      ))
+      assert(expression("f g (x)") == SurfaceExpr.App(
+        SurfaceExpr.App(SurfaceExpr.Var("f"), SurfaceExpr.Var("g")), SurfaceExpr.Var("x")
+      ))
+      assert(expression("f g[Int]") == SurfaceExpr.App(
+        SurfaceExpr.Var("f"), SurfaceExpr.TypeApp(SurfaceExpr.Var("g"), SurfaceType.IntType)
+      ))
       assert(run("def twice(x: Int): Int = x * 2 in twice 3 + twice 4 * 5") == Value.Integer(46))
     }
 
@@ -294,10 +404,12 @@ object CalculusTests {
       assert(run("def f(x: Int): Int = x in f 10 -2") == Value.Integer(8))
     }
 
-    test("typed let bindings lower to ascribed initializers without changing the expression AST") {
-      val expected = Expr.Let("a", Expr.Ascribe(Expr.IntLit(21), TypeExpr.IntType), Expr.Var("a"))
+    test("typed lets parse as ascribed initializers and elaborate identically") {
+      val ast = expression("let a = (21: Int) in a")
+      val expected = success(Pipeline.compile("let a: Int = 21 in a")).core
       Vector("let a: Int = 21 in a", "let a = (21: Int) in a", "let a: Int = 21\na").foreach { source =>
-        assert(parse(source) == expected)
+        assert(expression(source) == ast)
+        assert(success(Pipeline.compile(source)).core == expected)
         assert(run(source) == Value.Integer(21))
       }
       expectFailure(Pipeline.compile("let a: String = 21\na")) {
@@ -306,17 +418,18 @@ object CalculusTests {
       }
     }
 
-    test("all declaration forms share explicit and newline continuation boundaries") {
+    test("declarations and binding expressions share continuation separators") {
       val declarations = Vector(
         "let a = 21" -> "a",
-        "impl a: Int = 21" -> "summon[Int]",
+        "given a: Int = 21" -> "summon[Int]",
+        "instance a: Int = 21" -> "summon[Int]",
         "def f(x: Int): Int = x" -> "f 21",
         "type N = Int" -> "21: N",
-        "trait C = { value: Int }" -> "{ value = 21 }: C",
-        "impl Int = 21" -> "summon[Int]",
-        "impl { value: Int } = { value = 21 }" -> "summon[{ value: Int }].value",
-        "impl identity[A]: A -> A = (x: A) => x" -> "identity[Int](21)",
-        "impl [A]: A -> A = (x: A) => x" -> "summon[forall A. A -> A][Int](21)"
+        "trait C = { value: Int }" -> "implement C = { value = 21 } in C::value",
+        "trait C = { value: Int } in implement C = { value = 21 }" -> "C::value",
+        "instance selected: { value: Int } = { value = 21 }" -> "summon[{ value: Int }].value",
+        "instance identity[A]: A -> A = (x: A) => x" -> "identity[Int](21)",
+        "instance id[A]: A -> A = (x: A) => x" -> "summon[forall A. A -> A][Int](21)"
       )
       val separators = Vector(" in ", "\n", "\r\n", "\r", "; ", " // comment\n", " /* comment\n */ ")
       declarations.foreach { case (declaration, body) =>
@@ -327,16 +440,16 @@ object CalculusTests {
       }
     }
 
-    test("same-line declarations require a continuation separator") {
+    test("same-line declarations and bindings require a continuation separator") {
       Vector(
         "let a = 21 a",
-        "impl a: Int = 21 summon[Int]",
+        "instance a: Int = 21 summon[Int]",
         "def f(x: Int): Int = x f 21",
         "type N = Int 21",
         "trait C = { value: Int } 21",
         "let a = 21 /* no newline */ a",
         "let a = 21\n",
-        "impl a: Int = 21\n"
+        "instance a: Int = 21\n"
       ).foreach { source =>
         expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
       }
@@ -393,21 +506,53 @@ object CalculusTests {
       Vector("{ a = 1 b = 2 }", "summon[{ a: Int b: Int }]").foreach { source =>
         expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
       }
-      Vector("{}", "{\n}").foreach(source => assert(run(source) == Value.Record(Vector.empty)))
+      Vector("{}", "{\n}").foreach(source => assert(run(source) == Value.Record(Map.empty)))
       Vector(",", ";", "\n").foreach { separator =>
         assert(run(s"({ a = 21$separator }: { a: Int$separator }).a") == Value.Integer(21))
       }
     }
 
-    test("parser directly retains a first-class implementation binding") {
-      success(new Parser().parse("impl answer: Int = 21 in answer")) match {
-        case Expr.Impl("answer", TypeExpr.IntType, Expr.IntLit(value), Expr.Var("answer")) => assert(value == 21)
+    test("parser represents given as an expression with a body") {
+      expression("given answer: Int = 21 in answer") match {
+        case SurfaceExpr.Given("answer", SurfaceType.IntType, SurfaceExpr.IntLit(value), SurfaceExpr.Var("answer")) => {
+          assert(value == 21)
+        }
         case other => throw new AssertionError(s"Unexpected AST: $other")
       }
     }
 
-    test("named and anonymous implementations accept the same expression initializers") {
-      val prefix = "let existing = 21 in def identity(x: Int): Int = x in "
+    test("instance parameter lists expand to function annotations and lambda initializers") {
+      val prefix = "type Counted[A] = { value: A, count: Int } in "
+      val value = "{ value = value, count = count }"
+      val compact = s"instance counted[A](value: A, implicit count: Int): Counted[A] = $value"
+      val repeated = s"instance counted[A](value: A)(implicit count: Int): Counted[A] = $value"
+      val expanded = s"instance counted[A]: A -> (Int ~> Counted[A]) = (value: A, implicit count: Int) => $value"
+      val body = "counted[String](\"Ada\", using 21)"
+      Vector(compact, repeated, expanded).foreach { binding =>
+        assert(parse(s"$prefix$binding in $body") == parse(s"$prefix$expanded in $body"))
+        assert(run(s"$prefix$binding in $body") ==
+          Value.Record(Map("value" -> Value.Text("Ada"), "count" -> Value.Integer(21))))
+      }
+    }
+
+    test("instance parameters compose with where constraints and mixed application order") {
+      val source = """
+        |trait Offset[A] = { offset: A }
+        |implement Offset[Int] = { offset = 20 }
+        |instance combine[A where Offset[A]](value: A, implicit choose: A -> A -> A)(last: A): A =
+        |  choose(Offset[A]::offset)(choose(value)(last))
+        |def add(left: Int, right: Int): Int = left + right
+        |combine[Int](0, using add, 1)
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+      expectFailure(Pipeline.compile("instance bad(value: Int): String = value in 0")) {
+        case Error.ExpectedType(Type.StringType, Type.IntType) => true
+        case _ => false
+      }
+    }
+
+    test("instances and given accept arbitrary types and expression initializers") {
+      val prefix = "def identity(x: Int): Int = x in def existing: Int = 21 in "
       val cases = Vector(
         ("Int", "21", "summon[Int]"),
         ("Int", "existing", "summon[Int]"),
@@ -418,63 +563,86 @@ object CalculusTests {
         ("{ value: Int }", "{ value = 21 }", "summon[{ value: Int }].value")
       )
       cases.foreach { case (annotation, initializer, body) =>
-        Vector("", "selected: ").foreach { header =>
-          assert(run(s"${prefix}impl $header$annotation = $initializer in $body") == Value.Integer(21))
-        }
+        assert(run(s"${prefix}instance selected: $annotation = $initializer in $body") == Value.Integer(21))
+        assert(run(s"${prefix}given selected: $annotation = $initializer in $body") == Value.Integer(21))
       }
     }
 
-    test("implementation headers distinguish naming and type parameters from applied target types") {
+    test("given requires a name annotation initializer and body") {
+      Vector(
+        "given : Int = 21 in 0",
+        "given n = 21 in n",
+        "given n: Int in n",
+        "given n: Int = 21",
+        "given n[A]: A -> A = (x: A) => x in 0",
+        "given n(x: Int): Int = x in 0"
+      ).foreach { source =>
+        expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
+      }
+      val source = "given id: forall A. A -> A = [A] => (x: A) => x in id[Int](21)"
+      assert(run(source) == Value.Integer(21))
+      expectFailure(Pipeline.compile("given n: String = 21 in n")) {
+        case Error.ExpectedType(Type.StringType, Type.IntType) => true
+        case _ => false
+      }
+    }
+
+    test("instance names and type parameters are distinct from applied ordinary types") {
       val prefix = "type Box[A] = { value: A } in "
-      assert(run(prefix + "impl Box[Int] = { value = 21 } in Box[Int]::value") == Value.Integer(21))
-      assert(run(prefix + "impl Box[Box[Int]] = { value = { value = 21 } } in Box[Box[Int]]::value.value") ==
+      assert(run(prefix + "instance box: Box[Int] = { value = 21 } in Box[Int]::value") == Value.Integer(21))
+      assert(run(prefix + "instance box: Box[Box[Int]] = { value = { value = 21 } } in Box[Box[Int]]::value.value") ==
         Value.Integer(21))
-      assert(run(prefix + "impl Box[A]: A -> A = (x: A) => x in Box[Int](21)") == Value.Integer(21))
-      assert(run("type N = Int in impl N = 21 in summon[N]") == Value.Integer(21))
-      assert(run("impl [A]: A -> A = (x: A) => x in summon[forall A. A -> A][Int](21)") == Value.Integer(21))
+      assert(run(prefix + "instance Box[A]: A -> A = (x: A) => x in Box[Int](21)") == Value.Integer(21))
+      assert(run("type N = Int in instance n: N = 21 in summon[N]") == Value.Integer(21))
+      assert(run("instance id[A]: A -> A = (x: A) => x in summon[forall A. A -> A][Int](21)") == Value.Integer(21))
     }
 
-    test("named and anonymous generic implementations share where lowering and constraint order") {
-      val annotation = "forall A, B. A ~> B ~> { first: A, second: B }"
-      val initializer = "{ first = summon[A], second = summon[B] }"
-      val body = s"summon[$annotation][Int, String](using 21, using \"Ada\")"
-      val explicit = s"impl $annotation = [A, B] => (implicit a: A, implicit b: B) => $initializer in $body"
-      val expected = success(Pipeline.compile(explicit)).core
-      Vector("", "pair").foreach { name =>
-        Vector(" and ", ", ").foreach { separator =>
-          val source = s"impl $name[A, B where A${separator}B]: { first: A, second: B } = $initializer in $body"
-          assert(success(Pipeline.compile(source)).core == expected)
-          assert(run(source) == Value.Record(Vector("first" -> Value.Integer(21), "second" -> Value.Text("Ada"))))
-        }
+    test("type parameter clauses share where lowering and constraint order") {
+      val annotation = "forall A, B. { value: A } ~> { value: B } ~> { first: A, second: B }"
+      val initializer = "{ first = Default[A]::value, second = Default[B]::value }"
+      val body = s"summon[$annotation][Int, String](using { value = 21 }, using { value = \"Ada\" })"
+      val prefix = "trait Default[A] = { value: A } in trait Pair[A, B] = { first: A, second: B } in "
+      val explicit = s"""instance pair: $annotation = [A, B] =>
+        |(implicit a: { value: A }, implicit b: { value: B }) => { first = a.value, second = b.value } in $body
+        |""".stripMargin
+      val expected = success(Pipeline.compile(explicit)).target
+      Vector(
+        "instance pair[A, B where Default[A] and Default[B]]: { first: A, second: B }",
+        "implement[A, B where Default[A] and Default[B]] Pair[A, B]"
+      ).foreach { declaration =>
+        val source = s"$prefix$declaration = $initializer in $body"
+        assert(success(Pipeline.compile(source)).target == expected)
+        assert(run(source) == Value.Record(Map("first" -> Value.Integer(21), "second" -> Value.Text("Ada"))))
       }
     }
 
-    test("implementation headers can introduce constraints without type parameters") {
-      Vector("", "selected").foreach { name =>
-        val source = s"impl $name[where Int]: Int = summon[Int] in summon[Int ~> Int](using 21)"
+    test("implementation clauses can introduce constraints without type parameters") {
+      Vector("instance selected[where C]: { value: Int }", "implement[where C] C").foreach { declaration =>
+        val source = s"trait C = { value: Int } in $declaration = { value = C::value } in " +
+          "summon[{ value: Int } ~> { value: Int }](using { value = 21 }).value"
         assert(run(source) == Value.Integer(21))
       }
     }
 
-    test("implementation declarations require equals and a colon after every binder header") {
+    test("instances require names annotations and initializers") {
       Vector(
-        "impl named: { value: Int } { value = 21 } in 0",
-        "impl { value: Int } { value = 21 } in 0",
-        "impl named[A]: { value: A -> A } { value = (x: A) => x } in 0",
-        "impl [A]: { value: A -> A } { value = (x: A) => x } in 0",
-        "impl [A] A -> A = (x: A) => x in 0",
-        "impl named[A] A -> A = (x: A) => x in 0",
-        "impl named: = 21 in 0",
-        "impl : Int = 21 in 0",
-        "impl Int = 21",
-        "impl [A]: A -> A = (x: A) => x"
+        "instance named: { value: Int } { value = 21 } in 0",
+        "instance { value: Int } { value = 21 } in 0",
+        "instance named[A]: { value: A -> A } { value = (x: A) => x } in 0",
+        "instance [A]: { value: A -> A } { value = (x: A) => x } in 0",
+        "instance [A] A -> A = (x: A) => x in 0",
+        "instance named[A] A -> A = (x: A) => x in 0",
+        "instance named: = 21 in 0",
+        "instance : Int = 21 in 0",
+        "instance Int = 21",
+        "instance [A]: A -> A = (x: A) => x"
       ).foreach { source =>
         expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
       }
     }
 
     test("ordinary and implementation binders have separate indices") {
-      val parsed = success(new Parser().parse("impl d: Int = 21 in (x: String) => d"))
+      val parsed = success(new Parser().parse("instance d: Int = 21 in (x: String) => d"))
       val actual = success(new Elaborator().elaborate(parsed)).expression
       assert(actual == ImplicitTerm.Impl(
         Type.IntType,
@@ -504,71 +672,75 @@ object CalculusTests {
     }
 
     test("nearest matching implementation takes precedence") {
-      assert(run("impl first: Int = 1 in impl second: Int = 2 in summon[Int]") == Value.Integer(2))
+      assert(run("instance first: Int = 1 in instance second: Int = 2 in summon[Int]") == Value.Integer(2))
     }
 
     test("instances can be referred to and passed as ordinary values") {
-      assert(run("impl value: Int = 21 in ((x: Int) => x)(value)") == Value.Integer(21))
+      assert(run("instance value: Int = 21 in ((x: Int) => x)(value)") == Value.Integer(21))
     }
 
     test("an ordinary parameter can be installed as a local implementation") {
-      assert(run("((x: Int) => impl chosen: Int = x in summon[Int])(21)") == Value.Integer(21))
+      assert(run("((x: Int) => given chosen: Int = x in summon[Int])(21)") == Value.Integer(21))
     }
 
-    test("implementation bindings are nonrecursive") {
-      Vector("", "self: ").foreach { header =>
-        expectFailure(Pipeline.compile(s"impl ${header}Int = summon[Int] in summon[Int]")) {
-          case Error.MissingInstance(Type.IntType) => true
-          case _ => false
-        }
-        assert(run(s"impl outer: Int = 21 in impl ${header}Int = summon[Int] in summon[Int]") == Value.Integer(21))
+    test("instance bindings are nonrecursive") {
+      expectFailure(Pipeline.compile("instance self: Int = summon[Int] in summon[Int]")) {
+        case Error.MissingInstance(Type.IntType) => true
+        case _ => false
+      }
+      assert(run("instance outer: Int = 21 in instance self: Int = summon[Int] in summon[Int]") == Value.Integer(21))
+      expectFailure(Pipeline.compile("instance self(n: Int): Int = self(n) in 0")) {
+        case Error.UnknownTerm("self") => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("given self: Int = summon[Int] in self")) {
+        case Error.MissingInstance(Type.IntType) => true
+        case _ => false
       }
     }
 
     test("implementation annotations are checked") {
-      Vector("", "wrong: ").foreach { header =>
-        expectFailure(Pipeline.compile(s"impl ${header}Int = \"no\" in summon[Int]")) {
-          case Error.ExpectedType(Type.IntType, Type.StringType) => true
-          case _ => false
-        }
+      expectFailure(Pipeline.compile("instance wrong: Int = \"no\" in summon[Int]")) {
+        case Error.ExpectedType(Type.IntType, Type.StringType) => true
+        case _ => false
       }
-      Vector("", "wrong").foreach { name =>
-        expectFailure(Pipeline.compile(s"impl $name[A where A]: Int = summon[A] in 0")) {
-          case Error.ExpectedType(Type.Forall(Type.Implicit(Type.Variable(0), Type.IntType)), _) => true
-          case _ => false
-        }
+      expectFailure(Pipeline.compile(
+        "trait C[A] = { value: A } in instance wrong[A where C[A]]: Int = C[A]::value in 0"
+      )) {
+        case Error.ExpectedType(Type.IntType, Type.Variable(0)) => true
+        case _ => false
       }
     }
 
-    test("anonymous implementations preserve lexical scope and nearest matching selection") {
+    test("instances preserve lexical scope and nearest matching selection") {
       val source = """
-        |impl Int = 11
+        |instance first: Int = 11
         |let captured = (ignored: Int) => summon[Int]
-        |impl String = "Ada"
-        |impl Int = 21
+        |given text: String = "Ada"
+        |given second: Int = 21
         |{ before = captured(0), current = summon[Int], text = summon[String] }
         |""".stripMargin
-      assert(run(source) == Value.Record(Vector(
+      assert(run(source) == Value.Record(Map(
         "before" -> Value.Integer(11), "current" -> Value.Integer(21), "text" -> Value.Text("Ada")
       )))
-      expectFailure(Pipeline.compile("let result = { impl Int = 21\nsummon[Int] }\nsummon[Int]")) {
+      expectFailure(Pipeline.compile("let result = { given local: Int = 21\nsummon[Int] }\nsummon[Int]")) {
         case Error.MissingInstance(Type.IntType) => true
         case _ => false
       }
     }
 
     test("ordinary binders weaken references to the implementation environment") {
-      val source = "impl d: Int = 11 in let ignored = \"x\" in ((x: String) => summon[Int])(\"y\")"
+      val source = "instance d: Int = 11 in let ignored = \"x\" in ((x: String) => summon[Int])(\"y\")"
       assert(run(source) == Value.Integer(11))
     }
 
     test("implementation binders weaken references to the ordinary environment") {
-      val source = "let x = 11 in impl d: String = \"a\" in ((implicit q: String) => x)(using \"b\")"
+      val source = "let x = 11 in given d: String = \"a\" in ((implicit q: String) => x)(using \"b\")"
       assert(run(source) == Value.Integer(11))
     }
 
     test("source name shadowing does not remove an older implementation from search") {
-      val source = "impl x: Int = 11 in let x = 100 in summon[Int] + x"
+      val source = "instance x: Int = 11 in let x = 100 in summon[Int] + x"
       assert(run(source) == Value.Integer(111))
     }
 
@@ -577,7 +749,7 @@ object CalculusTests {
     }
 
     test("ordinary function application inserts all leading implicit arguments") {
-      val source = "impl d: Int = 21 in ((implicit a: Int) => (implicit b: Int) => (x: Int) => b + x)(1)"
+      val source = "instance d: Int = 21 in ((implicit a: Int) => (implicit b: Int) => (x: Int) => b + x)(1)"
       assert(run(source) == Value.Integer(22))
     }
 
@@ -594,14 +766,14 @@ object CalculusTests {
     }
 
     test("lookup distinguishes implicit and explicit arrows before erasure") {
-      val source = "impl f: Int -> Int = (x: Int) => x in summon[Int ~> Int]"
+      val source = "instance f: Int -> Int = (x: Int) => x in summon[Int ~> Int]"
       expectFailure(Pipeline.compile(source)) { case Error.MissingInstance(_) => true; case _ => false }
     }
 
     test("a bare implicit value is not forced merely by variable lookup") {
       val compilation = success(Pipeline.compile("(implicit x: Int) => x"))
       assert(compilation.core.tpe == Type.Implicit(Type.IntType, Type.IntType))
-      assert(success(compilation.target.infer()) == Type.Arrow(Type.IntType, Type.IntType))
+      assert(success(TypeChecker.infer(compilation.target)) == Type.Arrow(Type.IntType, Type.IntType))
     }
 
     test("polymorphic identity checks and evaluates") {
@@ -619,14 +791,14 @@ object CalculusTests {
     }
 
     test("aliases capture their declaration environment rather than later type names") {
-      val source = "([A] => type Saved = A in [A] => (x: Saved) => x)[Int][String](21)"
+      val source = "type A = Int in type Saved = A in type A = String in let x: Saved = 21 in x"
       assert(run(source) == Value.Integer(21))
     }
 
-    test("parameterized aliases preserve captured outer type variables") {
+    test("parameterized aliases instantiate beneath outer type variables") {
       val source = """
-        |([A] => type Pair[B] = { first: A, second: B } in
-        |  [C] => (p: Pair[C]) => p.first)[Int][String]({ first = 21, second = "Ada" })
+        |type Pair[A, B] = { first: A, second: B }
+        |([A] => [C] => (p: Pair[A, C]) => p.first)[Int][String]({ first = 21, second = "Ada" })
         |""".stripMargin
       assert(run(source) == Value.Integer(21))
     }
@@ -637,12 +809,12 @@ object CalculusTests {
     }
 
     test("duplicate record labels are rejected rather than silently overwritten") {
-      expectFailure(Pipeline.compile("{ x = 1, x = 2 }")) { case Error.DuplicateName("x") => true; case _ => false }
+      expectFailure(Pipeline.compile("{ x = 1, x = 2 }")) { case Error.Parse(_, _, _) => true; case _ => false }
     }
 
     test("alias arity is checked") {
       expectFailure(Pipeline.compile("type Box[A] = { value: A } in summon[Box]")) {
-        case Error.AliasArity("Box", 1, 0) => true
+        case Error.TypeArity("Box", 1, 0) => true
         case _ => false
       }
     }
@@ -658,16 +830,16 @@ object CalculusTests {
     }
 
     test("parser constructs a shared binary operator AST directly") {
-      val parsed = success(new Parser().parse("1 + 2 * 3"))
-      assert(parsed == Expr.BinOp(
+      val parsed = expression("1 + 2 * 3")
+      assert(parsed == SurfaceExpr.BinOp(
         OpKind.Add,
-        Expr.IntLit(1),
-        Expr.BinOp(OpKind.Mul, Expr.IntLit(2), Expr.IntLit(3))
+        SurfaceExpr.IntLit(1),
+        SurfaceExpr.BinOp(OpKind.Mul, SurfaceExpr.IntLit(2), SurfaceExpr.IntLit(3))
       ))
-      assert(success(new Parser().parse("\"a\" ++ \"b\"")) == Expr.BinOp(
+      assert(expression("\"a\" ++ \"b\"") == SurfaceExpr.BinOp(
         OpKind.Concat,
-        Expr.StringLit("a"),
-        Expr.StringLit("b")
+        SurfaceExpr.StringLit("a"),
+        SurfaceExpr.StringLit("b")
       ))
     }
 
@@ -697,8 +869,8 @@ object CalculusTests {
     }
 
     test("operators are checked independently in the final calculus") {
-      assert(success(Term.BinOp(OpKind.Lt, Term.IntLit(1), Term.IntLit(2)).infer()) == Type.BoolType)
-      expectFailure(Term.BinOp(OpKind.Add, Term.StringLit("bad"), Term.IntLit(1)).infer()) {
+      assert(success(TypeChecker.infer(Term.BinOp(OpKind.Lt, Term.IntLit(1), Term.IntLit(2)))) == Type.BoolType)
+      expectFailure(TypeChecker.infer(Term.BinOp(OpKind.Add, Term.StringLit("bad"), Term.IntLit(1)))) {
         case Error.ExpectedType(Type.IntType, Type.StringType) => true
         case _ => false
       }
@@ -720,9 +892,9 @@ object CalculusTests {
 
     test("SMT synthesis composes ordinary and implicit producers") {
       val source = """
-        |impl text: String = "Ada"
-        |impl toNumber: String -> Int = (text: String) => 21
-        |impl toBool: Int ~> Bool = (implicit number: Int) => number > 0
+        |instance text: String = "Ada"
+        |instance toNumber: String -> Int = (text: String) => 21
+        |instance toBool: Int ~> Bool = (implicit number: Int) => number > 0
         |summon[Bool]
         |""".stripMargin
       assert(run(source) == Value.Boolean(true))
@@ -730,7 +902,7 @@ object CalculusTests {
 
     test("SMT synthesis instantiates a producer with a function type") {
       val source = """
-        |impl identity[A]: A -> A = (a: A) => a
+        |instance identity[A]: A -> A = (a: A) => a
         |let twice = summon[(Int -> Int) -> (Int -> Int)]
         |twice((n: Int) => n + 1)(20)
         |""".stripMargin
@@ -739,7 +911,7 @@ object CalculusTests {
 
     test("SMT synthesis preserves rigid variables beneath nested universals") {
       val source = """
-        |impl choose[A, B]: A -> B -> A = (a: A, b: B) => a
+        |instance choose[A, B]: A -> B -> A = (a: A, b: B) => a
         |def specialize[T](x: T): T = {
         |  let selected = summon[forall B. T -> B -> T]
         |  selected[String](x, "ignored")
@@ -763,7 +935,7 @@ object CalculusTests {
         | implicit text: String) => summon[Bool]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
-      assert(success(compilation.target.infer()) == compilation.core.tpe.erased)
+      assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
     }
 
     test("SMT synthesis can instantiate a universal exposed after value application") {
@@ -772,7 +944,7 @@ object CalculusTests {
         | implicit handler: (forall B. B -> B) -> Int) => summon[Int -> Int]
         |""".stripMargin
       val compilation = success(Pipeline.compile(source))
-      assert(success(compilation.target.infer()) == compilation.core.tpe.erased)
+      assert(success(TypeChecker.infer(compilation.target)) == compilation.core.tpe.erased)
     }
 
     test("SMT synthesis does not unify distinct rigid type variables") {
@@ -833,7 +1005,7 @@ object CalculusTests {
       assert(context.instances == instances && context.typeDepth == 0)
     }
 
-    test("SMT input validation rejects ill-scoped types and noncanonical records") {
+    test("SMT input validation rejects ill-scoped types") {
       val synthesizer = new SmtSynthesizer()
       expectFailure(synthesizer.synthesize(Type.Variable(0), SynthesisContext(Nil, 0))) {
         case Error.InvalidTypeIndex(0, 0) => true
@@ -843,17 +1015,12 @@ object CalculusTests {
         case Error.InvalidTypeIndex(1, 1) => true
         case _ => false
       }
-      val record = Type.Record(Vector("z" -> Type.IntType, "a" -> Type.StringType))
-      expectFailure(synthesizer.synthesize(record, SynthesisContext(List(record), 0))) {
-        case Error.NonCanonicalRecord(Vector("z", "a")) => true
-        case _ => false
-      }
     }
 
     test("baseline does not instantiate polymorphic implementations") {
-      val generic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
+      val polymorphic = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
       val wanted = Type.Arrow(Type.IntType, Type.IntType)
-      val context = SynthesisContext(List(generic), typeDepth = 0)
+      val context = SynthesisContext(List(polymorphic), typeDepth = 0)
       expectFailure(new NaiveSynthesizer().synthesize(wanted, context)) {
         case Error.MissingInstance(actual) if actual == wanted => true
         case _ => false
@@ -887,7 +1054,7 @@ object CalculusTests {
           }
         }
       }
-      val source = "impl f: Int -> Int = (n: Int) => n + 1 in impl n: Int = 21 in summon[Int]"
+      val source = "instance f: Int -> Int = (n: Int) => n + 1 in instance n: Int = 21 in summon[Int]"
       assert(success(Pipeline.run(source, composing)) == Value.Integer(22))
     }
 
@@ -897,7 +1064,7 @@ object CalculusTests {
           Result.Ok(ImplicitTerm.Instance(0))
         }
       }
-      expectFailure(Pipeline.compile("impl n: Int = 0 in summon[String]", invalid)) {
+      expectFailure(Pipeline.compile("instance n: Int = 0 in summon[String]", invalid)) {
         case Error.InvalidEvidence(Type.StringType, Type.IntType) => true
         case _ => false
       }
@@ -917,31 +1084,143 @@ object CalculusTests {
 
     test("the final checker independently rejects ill-typed applications") {
       val malformed = Term.App(Term.Lam(Type.IntType, Term.Var(0)), Term.StringLit("no"))
-      expectFailure(malformed.infer()) { case Error.ExpectedType(_, _) => true; case _ => false }
+      expectFailure(TypeChecker.infer(malformed)) { case Error.ExpectedType(_, _) => true; case _ => false }
     }
 
     test("the final checker rejects free type variables and unerased implicit types") {
-      expectFailure(Term.Lam(Type.Variable(0), Term.Var(0)).infer()) {
+      expectFailure(TypeChecker.infer(Term.Lam(Type.Variable(0), Term.Var(0)))) {
         case Error.InvalidTypeIndex(0, 0) => true
         case _ => false
       }
-      expectFailure(Term.Lam(Type.Implicit(Type.IntType, Type.IntType), Term.Var(0)).infer()) {
+      expectFailure(TypeChecker.infer(Term.Lam(Type.Implicit(Type.IntType, Type.IntType), Term.Var(0)))) {
         case Error.ImplicitTypeInTarget(_) => true
         case _ => false
       }
     }
 
-    test("declaration syntax parses straight to type, ordinary, and implementation bindings") {
-      val source = "trait C[A] = { run: A -> A } in def id(x: Int): Int = x in impl i: Int = id(21) in summon[Int]"
+    test("the core checker infers and checks explicit terms independently of the surface language") {
+      val fields = Map(
+        "next" -> Term.Lam(Type.IntType, Term.BinOp(OpKind.Add, Term.Var(0), Term.IntLit(1))),
+        "enabled" -> Term.BoolLit(true),
+        "label" -> Term.StringLit("count")
+      )
+      val recordType = Type.Record(Map(
+        "next" -> Type.Arrow(Type.IntType, Type.IntType), "enabled" -> Type.BoolType, "label" -> Type.StringType
+      ))
+      assert(success(TypeChecker.infer(Term.Record(fields))) == recordType)
+      assert(success(TypeChecker.check(Term.Record(fields), recordType)) == ())
+      val term = Term.Let(Term.Record(fields), Term.App(Term.Proj(Term.Var(0), "next"), Term.IntLit(20)))
+      assert(success(TypeChecker.infer(term)) == Type.IntType)
+      assert(success(TypeChecker.check(term, Type.IntType)) == ())
+      assert(success(Evaluator.evaluate(term)) == Value.Integer(21))
+      expectFailure(TypeChecker.check(term, Type.StringType)) {
+        case Error.ExpectedType(Type.StringType, Type.IntType) => true
+        case _ => false
+      }
+      val fewerFields = Type.Record(Map("next" -> Type.Arrow(Type.IntType, Type.IntType)))
+      expectFailure(TypeChecker.check(Term.Record(fields), fewerFields)) {
+        case Error.ExpectedType(expected, actual) => expected == fewerFields && actual == recordType
+        case _ => false
+      }
+    }
+
+    test("the core checker validates negative depths and every input environment binding") {
+      expectFailure(TypeChecker.infer(Term.IntLit(21), typeDepth = -1)) {
+        case Error.InvalidTypeDepth(-1) => true
+        case _ => false
+      }
+      expectFailure(TypeChecker.check(Term.IntLit(21), Type.IntType, typeDepth = -1)) {
+        case Error.InvalidTypeDepth(-1) => true
+        case _ => false
+      }
+      val implicitType = Type.Implicit(Type.IntType, Type.IntType)
+      Vector(
+        Type.Variable(0) -> Error.InvalidTypeIndex(0, 0),
+        Type.Forall(Type.Variable(1)) -> Error.InvalidTypeIndex(1, 1),
+        Type.Record(Map("f" -> implicitType)) -> Error.ImplicitTypeInTarget(implicitType)
+      ).foreach { case (invalid, error) =>
+        val environment = List(Type.IntType, invalid)
+        assert(TypeChecker.infer(Term.IntLit(21), environment) == Result.Err(error))
+        assert(TypeChecker.check(Term.IntLit(21), Type.IntType, environment) == Result.Err(error))
+      }
+    }
+
+    test("the core checker validates expected types before comparing them") {
+      val implicitType = Type.Implicit(Type.IntType, Type.IntType)
+      Vector(
+        Type.Variable(-1) -> Error.InvalidTypeIndex(-1, 0),
+        Type.Forall(Type.Variable(1)) -> Error.InvalidTypeIndex(1, 1),
+        implicitType -> Error.ImplicitTypeInTarget(implicitType)
+      ).foreach { case (expected, error) =>
+        assert(TypeChecker.check(Term.IntLit(21), expected) == Result.Err(error))
+      }
+      assert(success(TypeChecker.check(Term.Var(0), Type.Variable(0), List(Type.Variable(0)), typeDepth = 1)) == ())
+    }
+
+    test("core type abstraction weakens the entire open environment without changing the caller's context") {
+      val environment = List(Type.Arrow(Type.Variable(0), Type.Variable(0)), Type.Variable(0))
+      val term = Term.TypeLam(Term.App(Term.Var(0), Term.Var(1)))
+      val expected = Type.Forall(Type.Variable(1))
+      assert(success(TypeChecker.infer(term, environment, typeDepth = 1)) == expected)
+      assert(success(TypeChecker.check(term, expected, environment, typeDepth = 1)) == ())
+      assert(TypeChecker.infer(Term.TypeLam(Term.Var(2)), environment, typeDepth = 1) ==
+        Result.Err(Error.InvalidTermIndex("target", 2)))
+      assert(success(TypeChecker.infer(Term.Var(0), environment, typeDepth = 1)) == environment.head)
+      assert(environment == List(Type.Arrow(Type.Variable(0), Type.Variable(0)), Type.Variable(0)))
+      val nested = Term.TypeLam(Term.Lam(Type.Variable(0), Term.TypeLam(Term.Var(0))))
+      assert(success(TypeChecker.infer(nested)) ==
+        Type.Forall(Type.Arrow(Type.Variable(0), Type.Forall(Type.Variable(1)))))
+    }
+
+    test("core type application supports impredicative arguments and capture-avoiding substitution") {
+      val identity = Term.TypeLam(Term.Lam(Type.Variable(0), Term.Var(0)))
+      val identityType = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
+      val application = Term.App(Term.TypeApp(identity, identityType), identity)
+      assert(success(TypeChecker.infer(application)) == identityType)
+      assert(success(TypeChecker.check(application, identityType)) == ())
+      val constant = Term.TypeLam(Term.TypeLam(Term.Lam(Type.Variable(1), Term.Var(0))))
+      val open = Term.TypeApp(constant, Type.Variable(0))
+      assert(success(TypeChecker.infer(open, typeDepth = 1)) ==
+        Type.Forall(Type.Arrow(Type.Variable(1), Type.Variable(1))))
+    }
+
+    test("the core checker reports malformed elimination forms and nonrecursive let scope") {
+      Vector(
+        Term.Var(-1) -> Error.InvalidTermIndex("target", -1),
+        Term.Var(0) -> Error.InvalidTermIndex("target", 0),
+        Term.App(Term.IntLit(0), Term.IntLit(1)) -> Error.ExpectedFunction(Type.IntType),
+        Term.TypeApp(Term.IntLit(0), Type.IntType) -> Error.ExpectedPolymorphic(Type.IntType),
+        Term.Proj(Term.IntLit(0), "value") -> Error.ExpectedRecord(Type.IntType),
+        Term.Proj(Term.Record(Map.empty), "value") -> Error.MissingField("value"),
+        Term.Let(Term.Var(0), Term.IntLit(1)) -> Error.InvalidTermIndex("target", 0),
+        Term.BinOp(OpKind.Add, Term.IntLit(1), Term.BoolLit(true)) -> Error.ExpectedType(Type.IntType, Type.BoolType)
+      ).foreach { case (term, error) => assert(TypeChecker.infer(term) == Result.Err(error)) }
+    }
+
+    test("resolution independently checks the result against its claimed core type") {
+      val invalid = Elaborated(ImplicitTerm.IntLit(21), Type.BoolType)
+      assert(new implicitlang.resolution.Resolver(new NaiveSynthesizer()).resolve(invalid) ==
+        Result.Err(Error.ExpectedType(Type.BoolType, Type.IntType)))
+    }
+
+    test("program parsing retains ordered declarations separately from its final expression") {
+      val source = "trait C[A] = { run: A -> A } in def id(x: Int): Int = x in instance i: Int = id(21) in summon[Int]"
       val ast = success(new Parser().parse(source))
       ast match {
-        case Expr.TypeLet("C", Vector("A"), _, Expr.Let("id", _, Expr.Impl("i", _, _, _))) => ()
+        case Program(
+          Vector(
+            Declaration.Trait("C", Vector("A"), _),
+            Declaration.Def("id", _, _, _, _),
+            Declaration.Instance("i", _, _, _)
+          ),
+          SurfaceExpr.Need(SurfaceType.IntType)
+        ) => ()
         case other => throw new AssertionError(s"Unexpected declaration lowering: $other")
       }
       assert(run(source) == Value.Integer(21))
     }
 
-    test("where becomes an implicit lambda without a new declaration representation") {
+    test("where elaborates to ordinary implicit arrows in the calculus") {
       val source = "trait C[A] = { run: A -> A } in def f[A where C[A]](x: A): A = x in f"
       val checked = success(new Elaborator().elaborate(success(new Parser().parse(source))))
       checked.tpe match {
@@ -951,47 +1230,56 @@ object CalculusTests {
     }
 
     test("named instance values remain usable through ordinary function arguments") {
-      val source = "impl answer: Int = 21 in def id(x: Int): Int = x in id(answer)"
+      val source = "def id(x: Int): Int = x in instance answer: Int = 21 in id(answer)"
       assert(run(source) == Value.Integer(21))
     }
 
     test("type synonyms do not need an extra runtime declaration") {
-      val source = "type N = Int in impl answer: N = 21 in summon[Int]"
+      val source = "type N = Int in instance answer: N = 21 in summon[Int]"
       assert(run(source) == Value.Integer(21))
     }
 
     test("typed field projection takes precedence over implicit method sugar") {
       val source = """
         |type Person = { name: String }
-        |impl getter: { name: Person -> String } = { name = (p: Person) => "unused" };
+        |instance getter: { name: Person -> String } = { name = (p: Person) => "unused" };
         |{ name = "Ada" }.name
         |""".stripMargin
       assert(run(source) == Value.Text("Ada"))
     }
 
     test("raw selection accepts any receiver without classifying it as a record") {
-      assert(parse("21.show") == Expr.Select(Expr.IntLit(21), "show"))
-      assert(parse("make(21).value") == Expr.Select(Expr.App(Expr.Var("make"), Expr.IntLit(21)), "value"))
-      assert(parse("((x: Int) => x).run") == Expr.Select(
-        Expr.Lam("x", TypeExpr.IntType, Expr.Var("x")),
+      assert(expression("21.show") == SurfaceExpr.Select(SurfaceExpr.IntLit(21), "show"))
+      assert(expression("make(21).value") == SurfaceExpr.Select(
+        SurfaceExpr.App(SurfaceExpr.Var("make"), SurfaceExpr.IntLit(21)), "value"
+      ))
+      assert(expression("((x: Int) => x).run") == SurfaceExpr.Select(
+        SurfaceExpr.Lam("x", Some(SurfaceType.IntType), SurfaceExpr.Var("x")),
         "run"
       ))
-      val expected = Expr.App(
-        Expr.Select(Expr.Need(TypeExpr.Named("ToString", Vector(TypeExpr.Named("Person", Vector.empty)))), "toString"),
-        Expr.Var("x")
+      val expected = SurfaceExpr.App(
+        SurfaceExpr.QualifiedSelect(
+          SurfaceType.Named("ToString", Vector(SurfaceType.Named("Person", Vector.empty))), "toString"
+        ),
+        SurfaceExpr.Var("x")
       )
-      assert(parse("ToString[Person]::toString(x)") == expected)
-      assert(parse("ToString [Person] :: toString x") == expected)
-      assert(parse("summon[ToString[Person]].toString(x)") == expected)
+      assert(expression("ToString[Person]::toString(x)") == expected)
+      assert(expression("ToString [Person] :: toString x") == expected)
+      assert(expression("summon[ToString[Person]].toString(x)") == SurfaceExpr.App(
+        SurfaceExpr.Select(
+          SurfaceExpr.Need(SurfaceType.Named("ToString", Vector(SurfaceType.Named("Person", Vector.empty)))), "toString"
+        ),
+        SurfaceExpr.Var("x")
+      ))
     }
 
     test("elaboration classifies record fields and methods while leaving evidence requests unresolved") {
       val field = success(new Elaborator().elaborate(parse("{ value = 21 }.value")))
       assert(field == Elaborated(
-        ImplicitTerm.Proj(ImplicitTerm.Record(Vector("value" -> ImplicitTerm.IntLit(21))), "value"),
+        ImplicitTerm.Proj(ImplicitTerm.Record(Map("value" -> ImplicitTerm.IntLit(21))), "value"),
         Type.IntType
       ))
-      val methodType = Type.Record(Vector("inc" -> Type.Arrow(Type.IntType, Type.IntType)))
+      val methodType = Type.Record(Map("inc" -> Type.Arrow(Type.IntType, Type.IntType)))
       val method = success(new Elaborator().elaborate(parse("(implicit methods: { inc: Int -> Int }) => 21.inc")))
       assert(method.expression == ImplicitTerm.ImplicitLam(
         methodType,
@@ -1007,7 +1295,7 @@ object CalculusTests {
     }
 
     test("type names cannot be used as values or dotted receivers even when evidence is available") {
-      val prefix = "trait C[A] = { run: A -> A } in impl C[Int] = { run = (n: Int) => n } in "
+      val prefix = "trait C[A] = { run: A -> A } in implement C[Int] = { run = (n: Int) => n } in "
       Vector("C", "C[Int]", "C[Int].run", "C[Int].run(21)").foreach { expression =>
         expectFailure(Pipeline.compile(prefix + expression)) {
           case Error.UnknownTerm("C") => true
@@ -1015,17 +1303,17 @@ object CalculusTests {
         }
       }
       assert(run(prefix + "C[Int]::run(21)") == Value.Integer(21))
-      assert(run(prefix + "summon[C[Int]].run(21)") == Value.Integer(21))
+      assert(run(prefix + "summon[{ run: Int -> Int }].run(21)") == Value.Integer(21))
     }
 
     test("qualified selection uses type names while dotted selection uses value names") {
       val source = """
         |type C = { value: Int }
-        |impl selected: C = { value = 21 }
+        |instance selected: C = { value = 21 }
         |let C = { value = 99 }
         |{ qualified = C::value, ordinary = C.value }
         |""".stripMargin
-      assert(run(source) == Value.Record(Vector("ordinary" -> Value.Integer(99), "qualified" -> Value.Integer(21))))
+      assert(run(source) == Value.Record(Map("ordinary" -> Value.Integer(99), "qualified" -> Value.Integer(21))))
       expectFailure(Pipeline.compile("let x = { value = 21 } in x::value")) {
         case Error.UnknownType("x") => true
         case _ => false
@@ -1038,7 +1326,7 @@ object CalculusTests {
       val source = """
         |type Person = { name: String }
         |trait ToString[A] = { toString: A -> String }
-        |impl ToString[Person] = { toString = (p: Person) => p.name }
+        |implement ToString[Person] = { toString = (p: Person) => p.name }
         |{ name = "Ada" }.toString
         |""".stripMargin
       assert(run(source) == Value.Text("Ada"))
@@ -1047,7 +1335,7 @@ object CalculusTests {
     test("selection on a function expression can resolve an implementation method") {
       val source = """
         |type Function = Int -> Int
-        |impl methods: { run: Function -> Int } = { run = (f: Function) => f(20) }
+        |instance methods: { run: Function -> Int } = { run = (f: Function) => f(20) }
         |((x: Int) => x + 1).run
         |""".stripMargin
       assert(run(source) == Value.Integer(21))
@@ -1056,7 +1344,7 @@ object CalculusTests {
     test("a present record field wins even when calling it is invalid") {
       val source = """
         |type Person = { show: Int }
-        |impl methods: { show: Person -> (Int -> Int) } = { show = (p: Person) => (n: Int) => n }
+        |instance methods: { show: Person -> (Int -> Int) } = { show = (p: Person) => (n: Int) => n }
         |{ show = 21 }.show(1)
         |""".stripMargin
       expectFailure(Pipeline.compile(source)) {
@@ -1069,8 +1357,8 @@ object CalculusTests {
       val prefix = """
         |type First = { show: Int -> String }
         |type Second = { show: Int -> String, tag: String }
-        |impl first: First = { show = (n: Int) => "first" }
-        |impl second: Second = { show = (n: Int) => "second", tag = "tag" }
+        |instance first: First = { show = (n: Int) => "first" }
+        |instance second: Second = { show = (n: Int) => "second", tag = "tag" }
         |""".stripMargin
       expectFailure(Pipeline.compile(prefix + "21.show")) {
         case Error.AmbiguousMethod("show", _) => true
@@ -1081,15 +1369,15 @@ object CalculusTests {
     }
 
     test("receiver syntax and explicit class selection have the same meaning") {
-      val prefix = "trait C[A] = { value: A -> Int } in impl C[Int] = { value = (n: Int) => n + 1 } in "
+      val prefix = "trait C[A] = { value: A -> Int } in implement C[Int] = { value = (n: Int) => n + 1 } in "
       assert(run(prefix + "21.value") == Value.Integer(22))
       assert(run(prefix + "C[Int]::value(21)") == Value.Integer(22))
     }
 
     test("method sugar rejects multiple distinct candidate evidence types") {
       val source = """
-        |impl first: { show: Int -> String } = { show = (n: Int) => "first" }
-        |impl second: { show: Int -> String, tag: String } = { show = (n: Int) => "second", tag = "tag" }
+        |instance first: { show: Int -> String } = { show = (n: Int) => "first" }
+        |instance second: { show: Int -> String, tag: String } = { show = (n: Int) => "second", tag = "tag" }
         |21.show
         |""".stripMargin
       expectFailure(Pipeline.compile(source)) { case Error.AmbiguousMethod("show", _) => true; case _ => false }
@@ -1100,15 +1388,180 @@ object CalculusTests {
       expectFailure(Pipeline.compile(source)) { case Error.ExpectedType(_, _) => true; case _ => false }
     }
 
-    test("generic where clauses allow both comma and and constraint separators") {
+    test("where accepts trait conjunctions separated by and") {
       val source = """
         |trait C[A] = { run: A -> A }
-        |def f[A where C[A], Int](x: A): A = C[A]::run(x)
-        |impl i: Int = 0
-        |impl C[String] = { run = (s: String) => s }
+        |trait D = { value: Int }
+        |def f[A where C[A] and D](x: A): A = C[A]::run(x)
+        |implement D = { value = 0 }
+        |implement C[String] = { run = (s: String) => s }
         |f[String]("Ada")
         |""".stripMargin
       assert(run(source) == Value.Text("Ada"))
+    }
+
+    test("where rejects commas and ordinary types across type parameter clauses") {
+      Vector("Int", "{ value: Int }", "C[A], C[A]").foreach { constraint =>
+        Vector(
+          s"def f[A where $constraint](x: A): A = x in f",
+          s"instance f[A where $constraint]: A -> A = (x: A) => x in f",
+          s"implement[A where $constraint] C[A] = { value = 0 } in 0"
+        ).foreach { source =>
+          expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
+        }
+      }
+      Vector("A", "Alias").foreach { constraint =>
+        expectFailure(Pipeline.compile(
+          s"type Alias = { value: Int } in def f[A where $constraint](x: A): A = x in f"
+        )) { case Error.ExpectedTrait(`constraint`) => true; case _ => false }
+      }
+    }
+
+    test("traits cannot appear in ordinary type positions or explicit evidence annotations") {
+      val prefix = "trait C = { value: Int } in "
+      Vector(
+        "let c: C = { value = 21 } in c",
+        "(c: C) => c",
+        "(implicit c: C) => c",
+        "def f(x: Int): C = { value = x } in f",
+        "instance c: C = { value = 21 } in c",
+        "type Alias = C in 0",
+        "type Container = { field: C } in 0",
+        "type Producer = Int ~> C in 0",
+        "type Quantified = forall A. C in 0",
+        "summon[C]",
+        "([A] => (x: A) => x)[C]",
+        "trait Nested[A] = { value: A } in def f[where Nested[C]](x: Int): Int = x in f"
+      ).foreach { source =>
+        expectFailure(Pipeline.compile(prefix + source)) { case Error.TraitInType("C") => true; case _ => false }
+      }
+    }
+
+    test("traits require record definitions and capture their lexical type environment") {
+      Vector("Int", "A", "A -> A", "forall B. B -> B").foreach { definition =>
+        expectFailure(Pipeline.compile(s"trait C[A] = $definition in 0")) {
+          case Error.ExpectedRecord(_) => true
+          case _ => false
+        }
+      }
+      val source = """
+        |type Saved = String
+        |type Dictionary[A] = { original: Saved, value: A }
+        |trait C[A] = Dictionary[A]
+        |type Saved = Int
+        |implement C[Int] = { value = 21, original = "Ada" }
+        |C[Int]::original
+        |""".stripMargin
+      assert(run(source) == Value.Text("Ada"))
+    }
+
+    test("trait expansion preserves captured type variables beneath type parameter clauses") {
+      val source = """
+        |trait Captured[A, T] = { value: A, original: T }
+        |def get[B, T where Captured[B, T]](ignored: B): T = Captured[B, T]::original
+        |def outer[T](value: T): T = get[Int, T](using { value = 0, original = value })(0)
+        |outer[String]("Ada")
+        |""".stripMargin
+      assert(run(source) == Value.Text("Ada"))
+    }
+
+    test("trait references check declaration kind arity and shadowing") {
+      expectFailure(Pipeline.compile("type C = { value: Int } in implement C = { value = 21 } in 0")) {
+        case Error.ExpectedTrait("C") => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("trait C[A] = { value: A } in def f[where C](x: Int): Int = x in f")) {
+        case Error.TypeArity("C", 1, 0) => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("def f[where Missing](x: Int): Int = x in f")) {
+        case Error.UnknownTrait("Missing") => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile("trait C = {} in def f[C where C](x: C): C = x in f")) {
+        case Error.ExpectedTrait("C") => true
+        case _ => false
+      }
+      assert(run("trait C = {} in type C = Int in let n: C = 21 in n") == Value.Integer(21))
+    }
+
+    test("implement is confined to the outer declaration sequence") {
+      val declaration = "implement C = { value = 21 } in C::value"
+      val prefix = "trait C = { value: Int } in "
+      Vector(
+        s"{ $declaration }",
+        s"($declaration)",
+        s"(x: Int) => $declaration",
+        s"def f(x: Int): Int = { $declaration } in f(0)",
+        s"let x = { $declaration } in x",
+        s"{ value = { $declaration } }",
+        s"((x: Int) => x)({ $declaration })",
+        s"instance x: Int = { $declaration } in x"
+      ).foreach { source =>
+        expectFailure(new Parser().parse(prefix + source)) { case Error.Parse(_, _, _) => true; case _ => false }
+      }
+      assert(run(prefix + "def id(x: Int): Int = x in " +
+        "implement C = { let n = 21 in given saved: Int = n in { value = id(saved) } } in C::value") ==
+        Value.Integer(21))
+    }
+
+    test("implement accepts computed dictionaries checks their types and is nonrecursive") {
+      val prefix = "trait C = { value: Int } in "
+      Vector(
+        "def chosen: { value: Int } = { value = 21 } in implement C = chosen in C::value",
+        "def make(x: Int): { value: Int } = { value = x } in implement C = make(21) in C::value"
+      ).foreach(source => assert(run(prefix + source) == Value.Integer(21)))
+      expectFailure(Pipeline.compile(prefix + "implement C = { value = true } in 0")) {
+        case Error.ExpectedType(Type.IntType, Type.BoolType) => true
+        case _ => false
+      }
+      expectFailure(Pipeline.compile(prefix + "implement C = { value = C::value } in C::value")) {
+        case Error.MissingInstance(Type.Record(fields)) => fields == Map("value" -> Type.IntType)
+        case _ => false
+      }
+    }
+
+    test("trait restrictions leave structural evidence and explicit dictionaries in the calculus") {
+      val source = """
+        |trait First = { value: Int }
+        |trait Second = { value: Int }
+        |implement First = { value = 21 }
+        |def read[where Second](ignored: Int): Int = Second::value
+        |{ found = read(0), explicit = read(using { value = 42 })(0) }
+        |""".stripMargin
+      assert(run(source) == Value.Record(Map("found" -> Value.Integer(21), "explicit" -> Value.Integer(42))))
+    }
+
+    test("record maps compare structurally throughout parsing checking and evaluation") {
+      val first = "{ z = 21, a = true, q = 3, d = 4, b = 5 }"
+      val second = "{ b = 5, d = 4, q = 3, a = true, z = 21 }"
+      assert(parse(first) == parse(second))
+      val left = success(Pipeline.compile(first))
+      val right = success(Pipeline.compile(second))
+      assert(left.core == right.core && left.target == right.target)
+      assert(left.core.hashCode == right.core.hashCode)
+      assert(run(first) == run(second))
+      Vector("type R = { x: Int, x: Bool } in 0", "trait R = { x: Int, x: Int } in 0").foreach { source =>
+        expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
+      }
+    }
+
+    test("SMT record encoding and decoded type arguments ignore map insertion order") {
+      val fields = Vector("z" -> Type.IntType, "a" -> Type.StringType, "q" -> Type.BoolType)
+      val first = Type.Record(fields.toMap)
+      val second = Type.Record(fields.reverse.toMap)
+      val identity = Type.Forall(Type.Arrow(Type.Variable(0), Type.Variable(0)))
+      val context = SynthesisContext(List(identity), 0)
+      val found = success(new SmtSynthesizer().synthesize(Type.Arrow(first, second), context))
+      assert(found == ImplicitTerm.TypeApp(ImplicitTerm.Instance(0), first))
+      assert(success(first.validate(0)) == ())
+    }
+
+    test("record type substitution preserves labels and free variable scope") {
+      val body = Type.Record(Map("z" -> Type.Variable(0), "a" -> Type.Variable(1)))
+      assert(body.instantiate(Type.StringType) == Type.Record(Map(
+        "a" -> Type.Variable(0), "z" -> Type.StringType
+      )))
     }
 
     test("a synthesized term cannot introduce an arbitrary literal") {
@@ -1141,7 +1594,7 @@ object CalculusTests {
           Result.Ok(ImplicitTerm.Instance(0))
         }
       }
-      expectFailure(Pipeline.compile("impl f: Int -> Int = (n: Int) => n in summon[Int ~> Int]", invalid)) {
+      expectFailure(Pipeline.compile("instance f: Int -> Int = (n: Int) => n in summon[Int ~> Int]", invalid)) {
         case Error.InvalidEvidence(_, _) => true
         case _ => false
       }
@@ -1166,15 +1619,15 @@ object CalculusTests {
         }
       }
       val source = """
-        |impl id: forall A. A ~> A = [A] => (implicit x: A) => x
-        |impl text: String = "Ada"
+        |instance id: forall A. A ~> A = [A] => (implicit x: A) => x
+        |instance text: String = "Ada"
         |summon[String]
         |""".stripMargin
       assert(success(Pipeline.run(source, composing)) == Value.Text("Ada"))
     }
 
     test("implementation values can be stored in and returned from ordinary records") {
-      assert(run("impl n: Int = 21 in let box = { value = n } in box.value") == Value.Integer(21))
+      assert(run("instance n: Int = 21 in let box = { value = n } in box.value") == Value.Integer(21))
     }
 
     test("a type parameter shadowing an alias does not become a term reference") {
@@ -1182,6 +1635,211 @@ object CalculusTests {
         case Error.UnknownTerm("C") => true
         case _ => false
       }
+    }
+
+    test("type trait implement instance and def declarations are top-level only") {
+      Vector(
+        "type Number = Int in 21",
+        "trait C = { value: Int } in 21",
+        "implement C = { value = 21 } in 21",
+        "def identity(x: Int): Int = x in identity(21)",
+        "instance answer: Int = 21 in answer"
+      ).foreach { declaration =>
+        Vector(
+          s"{ $declaration }",
+          s"($declaration)",
+          s"let result = { $declaration } in result",
+          s"let result = 0 in $declaration",
+          s"given result: Int = 0 in $declaration",
+          s"def outer(x: Int): Int = { $declaration } in outer(0)",
+          s"(x: Int) => $declaration",
+          s"{ value = { $declaration } }"
+        ).foreach { source =>
+          expectFailure(new Parser().parse(source)) { case Error.Parse(_, _, _) => true; case _ => false }
+        }
+      }
+      val local = expression("{ let x = 20 in given y: Int = x + 1 in summon[Int] }")
+      local match {
+        case SurfaceExpr.Let("x", _, SurfaceExpr.Given("y", _, _, SurfaceExpr.Need(SurfaceType.IntType))) => ()
+        case other => throw new AssertionError(s"Unexpected binding expression: $other")
+      }
+      assert(run("{ let x = 20 in given y: Int = x + 1 in summon[Int] }") == Value.Integer(21))
+    }
+
+    test("recursive definitions become a single let-bound fixpoint") {
+      val source = "def run(step: (Int -> Int) -> Int): Int = " +
+        "step((value: Int) => run((ignored: Int -> Int) => value)) in run"
+      val compilation = success(Pipeline.compile(source))
+      compilation.core.expression match {
+        case ImplicitTerm.Let(annotation, ImplicitTerm.Fix(recursiveType, _), ImplicitTerm.Var(0)) => {
+          assert(annotation == recursiveType && annotation == compilation.core.tpe)
+        }
+        case other => throw new AssertionError(s"Expected a recursive definition: $other")
+      }
+      assert(run(source + "((again: Int -> Int) => again(21))") == Value.Integer(21))
+    }
+
+    test("nonrecursive definitions including ordinary values omit fixpoints") {
+      Vector(
+        "def x: Int = 21 in x",
+        "def r: { l: Int } = { l = 21 } in r.l",
+        "def f(x: Int): Int = x in f(21)"
+      ).foreach { source =>
+        success(Pipeline.compile(source)).core.expression match {
+          case ImplicitTerm.Let(_, ImplicitTerm.Fix(_, _), _) => throw new AssertionError("Unexpected fixpoint")
+          case ImplicitTerm.Let(_, _, _) => ()
+          case other => throw new AssertionError(s"Expected a definition binding: $other")
+        }
+        assert(run(source) == Value.Integer(21))
+      }
+    }
+
+    test("recursion detection respects parameters lambdas local bindings and field labels") {
+      Vector(
+        "def f(f: Int): Int = f in f(21)",
+        "def f: Int -> Int = (f: Int) => f in f(21)",
+        "def x: Int = { let x = 21 in x } in x",
+        "def x: Int = { given x: Int = 21 in x } in x",
+        "def x: Int = { x = 21 }.x in x"
+      ).foreach { source =>
+        assert(run(source) == Value.Integer(21))
+        success(Pipeline.compile(source)).target match {
+          case Term.Let(Term.Fix(_, _), _) => throw new AssertionError("A shadowed name was treated as recursion")
+          case _ => ()
+        }
+      }
+      expectFailure(Pipeline.compile("def x: Int = let x = x in x in 0")) {
+        case Error.RecursiveDefinitionType("x", Type.IntType) => true
+        case _ => false
+      }
+    }
+
+    test("recursive definition restrictions inspect the resolved type beneath quantifiers") {
+      Vector(
+        "def x: Int = x in 0",
+        "def x[A]: Int = x[A] in 0",
+        "type Data = { l: Int } in def x: Data = { l = x.l + 1 } in 0"
+      ).foreach { source =>
+        expectFailure(Pipeline.compile(source)) { case Error.RecursiveDefinitionType("x", _) => true; case _ => false }
+      }
+      val source = """
+        |type Worker = ((Int -> Int) -> Int) -> Int
+        |def run: Worker = (step: (Int -> Int) -> Int) =>
+        |  step((value: Int) => run((ignored: Int -> Int) => value))
+        |run((again: Int -> Int) => again(21))
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+      val implicitSource = source.replace("((Int -> Int) -> Int) -> Int", "((Int -> Int) -> Int) ~> Int")
+        .replace("(step:", "(implicit step:").replace("run((ignored:", "run(using (ignored:")
+        .replace("run((again:", "run(using (again:")
+      assert(run(implicitSource) == Value.Integer(21))
+    }
+
+    test("recursive closures retain lexical implementations and outer ordinary values") {
+      val source = """
+        |trait Offset = { offset: Int }
+        |def base: Int = 20
+        |implement Offset = { offset = 1 }
+        |def run(step: (Int -> Int) -> Int): Int =
+        |  step((value: Int) => run((ignored: Int -> Int) => value + Offset::offset))
+        |implement Offset = { offset = 100 }
+        |run((again: Int -> Int) => again(base))
+        |""".stripMargin
+      assert(run(source) == Value.Integer(21))
+    }
+
+    test("core fixpoints accept ordinary values and recursive records") {
+      val constant = Term.Fix(Type.IntType, Term.IntLit(21))
+      assert(success(TypeChecker.infer(constant)) == Type.IntType)
+      assert(success(Evaluator.evaluate(constant)) == Value.Integer(21))
+      assert(success(TypeChecker.infer(Term.Fix(Type.IntType, Term.Var(0)))) == Type.IntType)
+      val recordType = Type.Record(Map("read" -> Type.Arrow(Type.IntType, Type.IntType)))
+      val recursive = Term.Fix(recordType, Term.Record(Map(
+        "read" -> Term.Lam(Type.IntType, Term.Let(Term.Var(1), Term.Var(1)))
+      )))
+      val application = Term.App(Term.Proj(recursive, "read"), Term.IntLit(21))
+      assert(success(TypeChecker.infer(application)) == Type.IntType)
+      assert(success(Evaluator.evaluate(application)) == Value.Integer(21))
+      val snapshot = success(Evaluator.evaluate(recursive))
+      assert(success(Evaluator.evaluate(application)) == Value.Integer(21))
+      assert(success(Evaluator.evaluate(recursive)) == snapshot)
+    }
+
+    test("fixpoint checking rejects mismatched bodies and malformed annotations") {
+      expectFailure(TypeChecker.infer(Term.Fix(Type.IntType, Term.BoolLit(true)))) {
+        case Error.ExpectedType(Type.IntType, Type.BoolType) => true
+        case _ => false
+      }
+      expectFailure(TypeChecker.infer(Term.Fix(Type.Variable(0), Term.Var(0)))) {
+        case Error.InvalidTypeIndex(0, 0) => true
+        case _ => false
+      }
+      val malformed = Type.Implicit(Type.IntType, Type.IntType)
+      expectFailure(TypeChecker.infer(Term.Fix(malformed, Term.Var(0)))) {
+        case Error.ImplicitTypeInTarget(_) => true
+        case _ => false
+      }
+    }
+
+    test("fixpoint binders participate in term weakening and type shifting") {
+      val term = Term.Fix(Type.Variable(0), Term.App(Term.Var(0), Term.Var(1)))
+      assert(term.shiftTerms(1) == Term.Fix(Type.Variable(0), Term.App(Term.Var(0), Term.Var(2))))
+      assert(term.shiftTypes(1) == Term.Fix(Type.Variable(1), Term.App(Term.Var(0), Term.Var(1))))
+    }
+
+    test("fixpoints cannot be invented by an evidence synthesizer") {
+      val invalid = new Synthesizer {
+        def synthesize(goal: Type, context: SynthesisContext): Result[ImplicitTerm, Error] = {
+          Result.Ok(ImplicitTerm.Fix(Type.IntType, ImplicitTerm.IntLit(21)))
+        }
+      }
+      expectFailure(Pipeline.compile("summon[Int]", invalid)) {
+        case Error.InvalidEvidenceForm(ImplicitTerm.Fix(_, _)) => true
+        case _ => false
+      }
+    }
+
+    test("evaluation uses explicit continuations for deeply nested bindings") {
+      val term = (0 until 20000).foldLeft[Term](Term.IntLit(21)) { (body, _) => Term.Let(Term.IntLit(0), body) }
+      assert(success(Evaluator.evaluate(term)) == Value.Integer(21))
+      assert(success(Evaluator.evaluate(Term.Fix(Type.IntType, term))) == Value.Integer(21))
+    }
+
+    test("ordinary closures capture value environments independently of their callers") {
+      val body = Term.BinOp(OpKind.Add, Term.Var(1), Term.Var(0))
+      val closure = success(Evaluator.evaluate(Term.Lam(Type.IntType, body), List(Value.Integer(20))))
+      val application = Term.App(Term.Var(0), Term.IntLit(1))
+      assert(success(Evaluator.evaluate(application, List(closure, Value.Integer(1000)))) == Value.Integer(21))
+      assert(success(Evaluator.evaluate(application, List(closure, Value.Integer(-1000)))) == Value.Integer(21))
+    }
+
+    test("fixpoint unfolding preserves outer values beneath nested binders and recursive references") {
+      val functionType = Type.Arrow(Type.IntType, Type.IntType)
+      val recordType = Type.Record(Map("read" -> functionType))
+      val body = Term.Record(Map(
+        "read" -> Term.Lam(Type.IntType, Term.Let(Term.Var(1), Term.BinOp(OpKind.Add, Term.Var(3), Term.Var(1))))
+      ))
+      val fix = Term.Fix(recordType, body)
+      val application = Term.App(Term.Proj(fix, "read"), Term.IntLit(1))
+      assert(success(TypeChecker.check(application, Type.IntType, List(Type.IntType))) == ())
+      assert(success(Evaluator.evaluate(application, List(Value.Integer(20)))) == Value.Integer(21))
+      val unfolded = body.instantiate(fix)
+      assert(success(TypeChecker.check(unfolded, recordType, List(Type.IntType))) == ())
+      val unfoldedApplication = Term.App(Term.Proj(unfolded, "read"), Term.IntLit(1))
+      assert(success(Evaluator.evaluate(unfoldedApplication, List(Value.Integer(20)))) == Value.Integer(21))
+    }
+
+    test("term substitution avoids both term and type variable capture") {
+      val argument = Term.Lam(Type.Variable(0), Term.Var(1))
+      val body = Term.TypeLam(Term.Lam(Type.Variable(0), Term.Var(1)))
+      val substituted = body.instantiate(argument)
+      assert(substituted == Term.TypeLam(Term.Lam(Type.Variable(0), Term.Lam(Type.Variable(1), Term.Var(2)))))
+      val expected = Type.Forall(Type.Arrow(Type.Variable(0), Type.Arrow(Type.Variable(1), Type.StringType)))
+      assert(success(TypeChecker.check(substituted, expected, List(Type.StringType), typeDepth = 1)) == ())
+      assert(Term.Let(Term.Var(0), Term.Var(1)).instantiate(Term.Var(0)) == Term.Let(Term.Var(0), Term.Var(1)))
+      assert(Term.Fix(Type.IntType, Term.Var(1)).instantiate(Term.Var(0)) == Term.Fix(Type.IntType, Term.Var(1)))
+      assert(Term.Record(Map("bound" -> Term.Var(0), "outer" -> Term.Var(1))).instantiate(Term.IntLit(21)) ==
+        Term.Record(Map("bound" -> Term.IntLit(21), "outer" -> Term.Var(0))))
     }
 
     println(s"$passed passed; $failed failed")

@@ -21,13 +21,15 @@
 \newcommand{\Bool}{\mathsf{Bool}}
 \newcommand{\TS}{\mathsf{ToString}}
 \newcommand{\wf}[1]{\Gamma\vdash #1\;\mathsf{type}}
-\newcommand{\E}[3]{\Gamma;\Delta\vdash #1:#2\rightsquigarrow #3}
+\newcommand{\E}[3]{\Gamma;\Delta\vdash #1\Rightarrow #2\rightsquigarrow #3}
+\newcommand{\EC}[3]{\Gamma;\Delta\vdash #1\Leftarrow #2\rightsquigarrow #3}
 \newcommand{\R}[2]{\Gamma;\Delta\vdash #1\Longrightarrow #2}
 \newcommand{\Pj}[2]{\Gamma;\Delta\vdash_{\mathrm{ev}} #1:#2}
 \newcommand{\need}[1]{\mathsf{need}[#1]}
 \newcommand{\hole}[1]{?_{#1}}
 \newcommand{\ilam}[3]{\lambda\{#1:#2\}.\,#3}
 \newcommand{\lam}[3]{\lambda(#1:#2).\,#3}
+\newcommand{\fix}[3]{\mathsf{fix}\;#1:#2.\,#3}
 \newcommand{\letin}[3]{\mathsf{let}\;#1=#2\;\mathsf{in}\;#3}
 \newcommand{\impl}[4]{\mathsf{impl}\;#1:#2=#3\;\mathsf{in}\;#4}
 \newcommand{\argop}[1]{\operatorname{arg}(#1)}
@@ -36,9 +38,10 @@
 \newcommand{\eval}[3]{#1\vdash #2\Downarrow #3}
 \newcommand{\kw}[1]{\mathsf{#1}}
 \newcommand{\fields}[1]{\{#1\}}
+\newcommand{\traittype}[1]{[\![#1]\!]}
 \begin{document}
 {\Large\bfseries\color{ink} A Minimal Calculus of Implicit Implementations}\par
-{\small Scala 3 reference model \hfill 29 October 2026}
+{\small Scala 3 reference model \hfill 30 October 2026}
 
 \section{Types, expressions, and contexts}
 \[
@@ -51,40 +54,40 @@ A,B,P,Q&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid A\to B\mid A\Rightarrow B
 \]
 $\Gamma$ binds type variables and ordinary values; $\Delta$ binds available implementation
 values, nearest first. $P,Q$ are ordinary types, not a distinct predicate sort.
-Record labels are distinct and canonically ordered. Equality is structural, modulo
+Records are finite maps with distinct labels; field order is immaterial. Equality is structural, modulo
 $\alpha$-equivalence and lexical type-synonym expansion. There is no subtyping.
 
 \textbf{Expression notation for the typing rules} (with resolved annotation types):
 \[
 \begin{array}{rcl}
-e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}
+e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}\mid\lambda x.e
  \mid e(e)\mid e\{e\}\\
-&&\mid\Lambda\alpha.e\mid e[A]\mid\letin{x}{e}{e}\mid\impl{d}{A}{e}{e}\\
+&&\mid\Lambda\alpha.e\mid e[A]\mid\letin{x}{e}{e}\mid\impl{d}{A}{e}{e}\mid\fix{x}{A}{e}\\
 &&\mid\{\ell_j=e_j\}_{j\in J}\mid e.\ell\mid(e:A)\mid\need A
  \mid e_1\mathbin{\odot}e_2
 \end{array}
 \]
-Before elaboration, annotation types may contain unexpanded names $C[\bar A]$, and
-expressions may contain lexical bindings $\kw{type}\ C[\bar a]=A\ \kw{in}\ e$.
-Section~\ref{sec:syntax} gives the source-to-AST translation; elaboration resolves
-annotations and expands type synonyms.
+The surface program has separate declarations and expressions, as specified in
+Section~\ref{sec:syntax}. Elaborating its declarations expands type and trait names
+and constructs a single unresolved term. The notation above describes the common
+binding and typing operations used in that translation.
 The syntax $e.\ell$ is an unclassified selection with an arbitrary term receiver. Elaboration determines
 whether a selection becomes a core projection or a method applied to its receiver.
 Both $x$ and $d$ are parsed as names; lexical name resolution distinguishes their binders.
 In rules, bound names are globally fresh by $\alpha$-renaming. This convention preserves
 ordinary source shadowing without conflating the two environments.
 
-\textbf{Unresolved core}:
+\textbf{Implicit terms}:
 \[
 \begin{array}{rcl}
 c&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{c}\mid\ilam{d}{A}{c}
  \mid c\,c\mid c\{c\}\\
-&&\mid\Lambda\alpha.c\mid c[A]\mid\letin{x:A}{c}{c}\mid\impl{d}{A}{c}{c}\\
+&&\mid\Lambda\alpha.c\mid c[A]\mid\letin{x:A}{c}{c}\mid\impl{d}{A}{c}{c}\mid\fix{x}{A}{c}\\
 &&\mid\{\ell_j=c_j\}_{j\in J}\mid c.\ell\mid\hole A
  \mid c_1\mathbin{\odot}c_2
 \end{array}
 \]
-The core has no aliases, traits, definitions, modules, or method-resolution operation.
+Implicit terms contain no aliases, traits, definitions, modules, or method-resolution operation.
 $\hole A$ is a deferred request, not a runtime term.
 
 \textbf{Primitive binary operators}:
@@ -125,14 +128,35 @@ Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
 \newpage
 \section{Practical syntax and the first AST}
 \label{sec:syntax}
-The source language translates into the named abstract syntax used by the calculus.
-Parsing determines grouping and expands syntactic sugar: parameter lists become nested
-binders, calls become nested applications, and declarations bind the rest of the expression.
-Names, type annotations, and selections remain unresolved until elaboration.
-
-Write $\hat e$ for the abstract expression obtained from source $e$, and $\hat A$ for
-the named type annotation obtained from source $A$. The mappings below use the mathematical
-constructors of Section~1, extended with lexical type bindings and unexpanded type names.
+Parsing produces a program consisting of top-level declarations followed by one
+final expression. The declaration forms are \texttt{type}, \texttt{trait},
+\texttt{implement}, \texttt{instance}, and \texttt{def}:
+\[
+\begin{aligned}
+ \Pi&=(\bar D,\hat e),\\
+ D&::=\kw{type}\ C[\bar a]=\hat A
+       \mid\kw{trait}\ C[\bar a]=\hat A\\
+  &\quad\mid\kw{implement}\ H\,\pi=\hat e
+       \mid\kw{instance}\ d\,H:\hat A=\hat e\\
+  &\quad\mid\kw{def}\ f\,H(\bar p):\hat A=\hat e.
+\end{aligned}
+\]
+Here $H$ is an optional type parameter clause, $\pi$ a trait reference, and
+$\bar p$ a parameter list. Instance parameter lists are expanded as described below.
+Write $\hat e$ for a parsed surface expression and $\hat A$ for a named surface type.
+Expressions include ordinary let bindings and local evidence bindings, each with a body:
+\[
+\begin{aligned}
+\texttt{let x = e in b}&\longmapsto\letin{x}{\hat e}{\hat b},\\
+\texttt{let x: A = e in b}&\longmapsto\letin{x}{(\hat e:\hat A)}{\hat b},\\
+\texttt{given d: A = e in b}&\longmapsto\impl{d}{\hat A}{\hat e}{\hat b}.
+\end{aligned}
+\]
+A \texttt{given} requires its annotation; an ordinary let may synthesize the initializer's
+type. Neither binder is in scope in its own initializer. Braces and parentheses only
+group expressions. Declarations precede the final expression and cannot occur inside it.
+Elaboration consumes the declarations and produces one implicit term; type and trait
+declarations leave no runtime node.
 
 \subsection*{Types and expression forms}
 \begin{center}
@@ -152,7 +176,9 @@ $(A)$ & $\hat A$\\
 \end{tabular}
 \end{center}
 Both arrows associate to the right. A type name is retained as written; elaboration
-determines whether it denotes a bound type variable or a lexical synonym.
+determines whether it denotes a bound type variable or a lexical synonym. A trait name
+is rejected in every ordinary type position, including annotations, type arguments,
+\texttt{summon}, and explicitly written implicit parameters.
 
 Names and literals translate to $x$, $n$, $b$, and $s$; string escapes are decoded.
 The remaining nonbinding forms translate as follows:
@@ -166,7 +192,7 @@ $\{\ell_1=e_1,\ldots,\ell_n=e_n\}$ & $\{\ell_1=\hat e_1,\ldots,\ell_n=\hat e_n\}
 \texttt{e: A} & $(\hat e:\hat A)$\\
 \texttt{summon[A]} & $\need{\hat A}$\\
 \texttt{e.field} & $\hat e.\mathit{field}$\\
-\texttt{P::field} & $(\need{\hat P}).\mathit{field}$\\
+\texttt{P::field} & $\hat P\mathbin{::}\mathit{field}$\\
 \texttt{f(a)}, \texttt{f a} & $\hat f(\hat a)$\\
 \texttt{f(using a)} & $\hat f\{\hat a\}$\\
 \texttt{f[A]} & $\hat f[\hat A]$\\
@@ -176,16 +202,20 @@ $e_1\mathbin{\odot}e_2$ & $\hat e_1\mathbin{\odot}\hat e_2$\\
 \end{tabular}
 \end{center}
 Field assignments distinguish a record literal from a brace group; \texttt{\{\}} is
-the empty record. A grouped expression can itself contain declarations.
+the empty record. Duplicate labels are rejected before fields become a finite map.
+A grouped expression can contain nested let and given expressions.
 Consequently, \texttt{f \{ e \}} translates to the ordinary application $\hat f(\hat e)$.
 Binary operators use the primitive operations specified in Section~1.
 
 \subsection*{Binders and application lists}
-A parameter group contains one or more comma-separated entries
-\texttt{x: A} or \texttt{implicit d: P}. Concatenate repeated groups in source order
+A lambda parameter group contains one or more comma-separated entries
+\texttt{x}, \texttt{x: A}, or \texttt{implicit d: P}. Ordinary lambda annotations are optional;
+implicit parameters require annotations. Declaration parameters in \texttt{def} and
+\texttt{instance} require annotations. Concatenate repeated groups in source order
 to obtain $\bar p=[p_1,\ldots,p_n]$. Each entry wraps an abstract body $E$:
 \[
 \begin{aligned}
+\mathcal L_x(E)&=\lambda x.E,\\
 \mathcal L_{x:A}(E)&=\lam{x}{\hat A}{E},\\
 \mathcal L_{\texttt{implicit }d:P}(E)&=\ilam{d}{\hat P}{E},\\
 \mathcal L_{\bar p}(E)&=
@@ -193,6 +223,7 @@ to obtain $\bar p=[p_1,\ldots,p_n]$. Each entry wraps an abstract body $E$:
 \end{aligned}
 \]
 A lambda \texttt{(}$\bar p$\texttt{) => e} translates to $\mathcal L_{\bar p}(\hat e)$.
+A single unannotated parameter also admits \texttt{x => e}, producing $\lambda x.\hat e$.
 Comma-separated parameters and repeated groups therefore produce the same nested binders,
 with the first parameter outermost. For example:
 \[
@@ -214,88 +245,134 @@ marks just its own argument; type-argument lists likewise produce successive typ
 Automatic insertion of missing implicit arguments belongs to elaboration of ordinary
 application; the parser preserves the applications actually written.
 
-\subsection*{Declarations and generic headers}
-A declaration takes a continuation $b$, the rest of the expression.
-In the mappings below, \texttt{;} stands for \texttt{in}, a semicolon, or a newline.
-A sequence therefore becomes nested bindings around its final expression.
-\begin{center}
-\renewcommand{\arraystretch}{1.2}
-\begin{tabular}{@{}ll@{}}
-\toprule
-Source declaration and continuation & Named abstract expression\\
-\midrule
-\texttt{let x = e; b} & $\letin{x}{\hat e}{\hat b}$\\
-\texttt{let x: A = e; b} & $\letin{x}{(\hat e:\hat A)}{\hat b}$\\
-$\texttt{type }C[\bar a]\texttt{ = A; b}$
- & $\kw{type}\ C[\bar a]=\hat A\ \kw{in}\ \hat b$\\
-$\texttt{trait }C[\bar a]\texttt{ = A; b}$
- & $\kw{type}\ C[\bar a]=\hat A\ \kw{in}\ \hat b$\\
-\bottomrule
-\end{tabular}
-\end{center}
-An omitted type-parameter list supplies the empty list in a lexical type binding.
+\subsection*{Declarations, programs, and type parameters}
+A file is a declaration sequence followed by a final expression:
+\[
+ \texttt{d}_1\texttt{;}\cdots\texttt{;}\texttt{d}_n\texttt{;}\texttt{e}
+ \quad\longmapsto\quad ([\hat d_1,\ldots,\hat d_n],\hat e).
+\]
+Here \texttt{;} stands for \texttt{in}, a semicolon, or a newline. The same separators
+join a let or given initializer to its body.
 
-For definitions and implementations, a generic header
-$H=\texttt{[}a_1,\ldots,a_n\ \texttt{where }P_1,\ldots,P_k\texttt{]}$
-has two effects. It wraps the value in type and implicit abstractions, and wraps a declared
-implementation type in the corresponding quantifiers and arrows:
+A \texttt{type C[}$\bar a$\texttt{] = A} declaration introduces an ordinary alias;
+\texttt{trait C[}$\bar a$\texttt{] = A} introduces a trait whose definition must
+expand to a record type. Both are sequential and nonrecursive. Parameters are distinct
+and the definition expands earlier aliases at declaration time. Its instantiated body
+is obtained by capture-avoiding substitution for those parameters. The frontend records
+the declaration kind, while the resulting calculus types are structural.
+
+Write $\pi=C[A_1,\ldots,A_m]$ for a trait reference and $\Sigma$ for the sequential
+declaration environment. The expansion $\traittype{\pi}_\Sigma=D$ is defined only
+when $C$ names a trait, the arity matches, and every $A_i$ is an ordinary type.
+$D$ is the dictionary's record type. Trait references occur in \texttt{where},
+\texttt{implement} targets, and qualified member access. Explicit dictionary values
+use ordinary record types or aliases.
+
+A type parameter clause has the form
+\[
+ H=\texttt{[}a_1,\ldots,a_n\ \texttt{where }\pi_1\ \texttt{and}\ \cdots
+ \ \texttt{and}\ \pi_k\texttt{]}.
+\]
+The type parameter list may be empty. The optional \texttt{where} clause, when present,
+contains one or more trait references separated by \texttt{and}. Type parameter clauses
+belong to \texttt{def}, \texttt{implement}, and \texttt{instance} declarations.
+After binding the type parameters, elaboration resolves $D_j=\traittype{\pi_j}_\Sigma$
+and uses these abstraction operations:
 \[
 \begin{aligned}
-\mathcal G_H(E)
+\mathcal G_H(c)
  &=\Lambda a_1.\cdots\Lambda a_n.
-   \ilam{d_1}{\hat P_1}{\cdots\ilam{d_k}{\hat P_k}{E}},\\
+   \ilam{d_1}{D_1}{\cdots\ilam{d_k}{D_k}{c}},\\
 \mathcal Q_H(T)
  &=\forall a_1.\cdots\forall a_n.
-   \hat P_1\Rightarrow\cdots\Rightarrow\hat P_k\Rightarrow T.
+   D_1\Rightarrow\cdots\Rightarrow D_k\Rightarrow T.
 \end{aligned}
 \]
-The $d_j$ are fresh binders with no source-accessible names.
-The type-parameter list may be empty, and the \texttt{where} clause is optional.
-An omitted header makes both constructions the identity.
-Constraints are separated by \texttt{and} or commas.
-Using the parameter construction $\mathcal L$ above, a definition translates as
+The $d_j$ are fresh source-inaccessible binders. An omitted clause makes both
+operations the identity.
+
+The two evidence declarations are
+\begin{lstlisting}
+implement[A where C[A]] D[A] = expression
+instance name[A where C[A]](parameters): R = expression
+\end{lstlisting}
+Type parameter clauses are optional; instance value parameters are also optional.
+The first form requires a trait target and is anonymous. The second requires a name
+and accepts any ordinary type. Both are top-level and nonrecursive.
+
+Instance value parameters use the same curried binders as lambdas. Their annotations
+also construct a function type, with each implicit parameter choosing $\Rightarrow$:
 \[
 \begin{aligned}
-&\texttt{def }f\,H\,\texttt{(}\bar p\texttt{): R = e; b}\\
-&\qquad\longmapsto
- \letin{f}{\mathcal G_H(\mathcal L_{\bar p}((\hat e:\hat R)))}{\hat b}.
+\mathcal F_{x:A}(T)&=\hat A\to T,&
+\mathcal F_{\texttt{implicit }d:P}(T)&=\hat P\Rightarrow T,\\
+\mathcal F_{\bar p}(T)&=\mathcal F_{p_1}(\cdots\mathcal F_{p_n}(T)\cdots).
 \end{aligned}
 \]
-The result annotation sits inside all the function's binders.
-The \texttt{where} constraints precede the explicitly written ordinary and implicit parameters.
+Thus \texttt{instance d}$H$\texttt{(}$\bar p$\texttt{): R = e} becomes the declaration
+$\kw{instance}\ d\,H:\mathcal F_{\bar p}(\hat R)=\mathcal L_{\bar p}(\hat e)$.
+With no value parameters, these operations are the identity.
 
-\begin{minipage}{\textwidth}
-Implementations have the following forms:
-\begin{lstlisting}
-impl Q = e; b
-impl name: Q = e; b
-impl [A where P]: Q = e; b
-impl name[A where P]: Q = e; b
-\end{lstlisting}
-All four translate to
+If $T$ is an implementation's expanded trait type or an instance's resolved annotation,
+the initializer is checked against $T$ under the clause's type and constraint binders.
+Let $c$ be that checked initializer and $b$ the elaboration of the remaining program.
+Both evidence declarations produce
 \[
- \impl{d}{\mathcal Q_H(\hat Q)}{\mathcal G_H(\hat e)}{\hat b},
+ \impl{d}{\mathcal Q_H(T)}{\mathcal G_H(c)}{b}.
 \]
-where $d$ is the supplied name or a fresh source-inaccessible binder, and an absent $H$ is empty.
-The colon separates a name or header from the target type, so \texttt{impl C[A] = e}
-has target type \texttt{C[A]}. Every form requires \texttt{=}, followed by any expression.
-\end{minipage}
+The new evidence binding is available only in $b$. Its name is supplied by
+\texttt{instance} or generated for \texttt{implement}. A local \texttt{given d: A = e in b}
+instead checks $e$ against its ordinary annotation directly, then elaborates $b$ with
+$d:A$ in $\Delta$. A polymorphic local value uses an explicit universal annotation and
+type abstraction, for example \texttt{given id: forall A. A -> A = [A] => x => x in body}.
+Type and trait declarations update $\Sigma$ and contribute no term binding.
 
-\begin{minipage}{\textwidth}
-For example, the definition
+\subsection*{Definitions and recursion}
+A definition retains its name, type parameters, value parameters, result annotation, and body:
+\begin{lstlisting}
+def f[A where C[A]](parameters): R = body
+\end{lstlisting}
+The type parameter clause and value parameter groups are optional; the result annotation is required.
+Let $V$ be the body abstracted over the written parameters and type parameter clause, and $T$ its
+full declared type, including those arrows and quantifiers. The generated \texttt{where}
+parameters precede the written parameters. A definition with no self-reference produces
+$\letin{f:T}{V}{b}$. Otherwise the body is checked with $f:T$ in $\Gamma$ and produces
+\[
+ \letin{f:T}{\fix{f}{T}{V}}{b}.
+\]
+A self-reference is a free term occurrence of $f$ in the abstracted body: parameter,
+lambda, let, and given shadowing are respected. A local binding does not bind its
+own initializer. Field labels and type names are not term references. Declarations
+are sequential; the self binding does not enable mutual or forward recursion.
+
+The surface restriction on recursive definitions is
+\[
+\begin{aligned}
+ \operatorname{function}(A\to B)&=\mathsf{true},&
+ \operatorname{function}(A\Rightarrow B)&=\mathsf{true},\\
+ \operatorname{function}(\forall\alpha.A)&=\operatorname{function}(A),&
+ \operatorname{function}(A)&=\mathsf{false}\quad\text{otherwise}.
+\end{aligned}
+\]
+Elaboration requires $\operatorname{function}(T)$ only when inserting a fixpoint.
+Thus \texttt{def x: Int = x} and a self-referencing record definition are rejected,
+while nonrecursive values of those types are allowed. The calculus's fixpoint has
+no function-type restriction. Neither the core nor the surface function check
+promises termination.
+
+For example, a nonrecursive definition
 \begin{lstlisting}
 def display[A where ToString[A]](x: A): String = x.toString
 rest
 \end{lstlisting}
-translates to
+remains a definition declaration followed by the expression \texttt{rest} in the
+surface program. If $D_A=\{\kw{toString}:A\to\Str\}$, elaboration produces
 \[
- \letin{\kw{display}}
- {\Lambda A.\ilam{d}{\TS[A]}{\lam{x}{A}{(x.\kw{toString}:\Str)}}}
- {\kw{rest}}.
+ \letin{\kw{display}:\forall A.D_A\Rightarrow A\to\Str}
+ {\Lambda A.\ilam{d}{D_A}{\lam{x}{A}{(\hole{D_A}).\kw{toString}\;x}}}
+ {c_{\kw{rest}}}.
 \]
-Here $d$ is the generated constraint binder. The type name $\TS[A]$, selection
-$x.\kw{toString}$, and result ascription remain in the abstract expression for elaboration.
-\end{minipage}
+This is one term: the trait and definition declarations have been consumed by elaboration.
 
 \subsection*{Grouping and the elaboration boundary}
 Precedence, from tightest to loosest, is adjacent postfix operations, application,
@@ -311,49 +388,51 @@ Line breaks are allowed where a component is still required, such as after \text
 or \texttt{=>}. Record fields require commas, semicolons, or newlines, with an optional
 trailing separator. Comments are whitespace; newlines inside them also act as boundaries.
 
-The resulting expression records syntax and lexical nesting. Elaboration resolves term
+The program records declaration order; expression binders record lexical nesting. Elaboration resolves term
 names against ordinary and implementation binders, resolves type names against type
-variables and synonyms, and checks annotations. It classifies each selection $e.\ell$
+variables and synonyms, validates trait references, and checks annotations. It classifies each selection $e.\ell$
 using the receiver's type: an existing record field becomes a projection; otherwise the
 method rule may introduce an implementation request and apply its selected member to
-the receiver. For \texttt{P::field}, parsing has already made that request explicit as
-$(\need{\hat P}).\mathit{field}$. Types remain separate from term receivers:
-\texttt{ToString[A].toString} fails elaboration when \texttt{ToString} names only a type.
+the receiver. For \texttt{P::field}, elaboration first resolves $P$ as a trait reference
+or ordinary type, obtaining a dictionary type $D$, then elaborates $(\need D).\mathit{field}$.
+Types and traits remain separate from term receivers:
+\texttt{ToString[A].toString} fails elaboration when \texttt{ToString} names only a trait.
 Evidence resolution later supplies implementations for the resulting requests.
 
 \newpage
 \subsection*{Worked translations}
-The following complete programs illustrate how the translations compose. Symbols such as
+The following complete programs illustrate how declaration elaboration and expression translation compose. Symbols such as
 $v$ and $e_{\mathrm{body}}$ abbreviate subexpressions of the displayed mathematical tree.
 Generated binders are fresh and source-inaccessible.
 
-\textbf{1. Generic definitions with mixed parameters and arguments.}
+\textbf{1. Type abstractions with mixed parameters and arguments.}
 \begin{lstlisting}
-def choose[A where A](fallback: A, implicit preferred: A)(last: A): A = preferred
-impl Int = 11
+trait Default[A] = { value: A }
+def choose[A where Default[A]](fallback: A, implicit preferred: A)(last: A): A = preferred
+implement Default[Int] = { value = 11 }
 choose[Int](0, using 21, 99)
 \end{lstlisting}
 The definition introduces its type parameter, its generated constraint parameter, and then
-its three written parameters, in that order:
+its three written parameters, in that order. After validating and expanding the trait:
 \[
 \begin{aligned}
 v_{\kw{choose}}
- &=\Lambda A.\ilam{d}{A}{
+ &=\Lambda A.\ilam{d}{\{\kw{value}:A\}}{
    \lam{\kw{fallback}}{A}{
    \ilam{\kw{preferred}}{A}{
    \lam{\kw{last}}{A}{(\kw{preferred}:A)}}}},\\
 e
  &=\letin{\kw{choose}}{v_{\kw{choose}}}{
-   \impl{i}{\Int}{11}{((\kw{choose}[\Int](0))\{21\})(99)}}.
+   \impl{i}{\{\kw{value}:\Int\}}{\{\kw{value}=11\}}{((\kw{choose}[\Int](0))\{21\})(99)}}.
 \end{aligned}
 \]
 Only the argument $21$ is marked implicit in the parsed call. When elaboration reaches
 the first ordinary argument $0$, it inserts the request for the leading \texttt{where}
 constraint. The unresolved call is therefore
 \[
- ((\kw{choose}[\Int]\{\hole{\Int}\})(0))\{21\}(99).
+ ((\kw{choose}[\Int]\{\hole{\{\kw{value}:\Int\}}\})(0))\{21\}(99).
 \]
-Resolution supplies $11$ for that request; $21$ is supplied directly to
+Resolution supplies $\{\kw{value}=11\}$ for that request; $21$ is supplied directly to
 $\kw{preferred}$. The program returns $21$. Replacing the two parameter groups by
 \texttt{(fallback: A)(implicit preferred: A)(last: A)} gives the same abstract definition.
 
@@ -362,21 +441,20 @@ $\kw{preferred}$. The program returns $21$. Replacing the two parameter groups b
 type Box[A] = { value: A }
 let box: Box[Int] = {
   let seed: Int = 20
-  impl Int = seed + 1
+  given chosen: Int = seed + 1
   { value = summon[Int] }
 }
 box.value
 \end{lstlisting}
-The initializer's outer braces group its nested bindings; the inner field assignment
-constructs a record. Both type annotations become ascriptions:
+The initializer's outer braces group nested let and given expressions; the inner
+field assignment constructs a record. After annotations and the alias are resolved:
 \[
 \begin{aligned}
 e_{\mathrm{body}}
- &=\letin{\kw{seed}}{(20:\Int)}{
-   \impl{d}{\Int}{\kw{seed}+1}{\{\kw{value}=\need{\Int}\}}},\\
+ &=\letin{\kw{seed}:\Int}{20}{
+   \impl{\kw{chosen}}{\Int}{\kw{seed}+1}{\{\kw{value}=\hole{\Int}\}}},\\
 e
- &=\kw{type}\ \kw{Box}[A]=\{\kw{value}:A\}\ \kw{in}\\
- &\qquad\letin{\kw{box}}{(e_{\mathrm{body}}:\kw{Box}[\Int])}{\kw{box}.\kw{value}}.
+ &=\letin{\kw{box}:\{\kw{value}:\Int\}}{e_{\mathrm{body}}}{\kw{box}.\kw{value}}.
 \end{aligned}
 \]
 The newline after the closing brace starts the continuation of \texttt{let box}.
@@ -385,68 +463,99 @@ $\kw{box}.\kw{value}$. The record retains the value $21$, which is the program's
 
 \newpage
 \section{Typing and elaboration: functions and bindings}
-\subsection*{Judgments and name resolution}
+\subsection*{Bidirectional judgments and name resolution}
 \[
-\boxed{\E e A c}\qquad
-\boxed{\R c t}\qquad
-\boxed{H\vdash t:T}\qquad
-\boxed{\eval\rho t v}
+\boxed{\E e A c}\qquad\boxed{\EC e A c}
 \]
-These are, respectively, name/type elaboration, evidence resolution, explicit-target
-typing, and evaluation. The implementation uses separate de Bruijn indices for $\Gamma$
-and $\Delta$, and a type-variable depth. The final target has one term-index space.
+The first judgment synthesizes $A$ from $e$; the second checks $e$ against an expected
+$A$. Both produce a fully annotated implicit term $c$. An unannotated lambda requires
+checking against an ordinary function type. Type annotations, application parameter types,
+definition signatures, and evidence declarations supply expected types. Checking propagates
+these types through nested lambdas, type abstractions, record fields, and binding bodies.
+Let initializers without annotations synthesize their types independently of later uses.
+No type is inferred backward from a lambda's body or from later calls.
 
-A nonrecursive synonym $C[\bar\alpha]=B$ expands
-$C[\bar A]$ to $B[\bar A/\bar\alpha]$ in its lexical body. Expansion is
-capture avoiding: $B$ retains its declaration-time type-variable bindings.
-$|\bar A|=|\bar\alpha|$ is required. Types and values are resolved in their respective
-namespaces.
+Resolution, target typing, and evaluation use the separate judgments
+\[
+\boxed{\R c t}\qquad\boxed{H\vdash t:T}\qquad\boxed{\eval\rho t v}.
+\]
+The implementation uses separate de Bruijn indices for $\Gamma$ and $\Delta$, and a
+type-variable depth. The final target has one term-index space.
 
-All annotation types must satisfy $\wf A$. Instance selection does not occur in this judgment.
+A nonrecursive synonym $C[\bar\alpha]=B$ expands $C[\bar A]$ to
+$B[\bar A/\bar\alpha]$ in its lexical body. Expansion is capture avoiding:
+the declaration's parameters bind only their own occurrences in $B$.
+Earlier aliases are expanded when the declaration is checked.
+$|\bar A|=|\bar\alpha|$ is required. Types and values resolve in separate namespaces.
+All annotation and expected types must be well formed. These judgments do not search
+for evidence; they insert deferred requests.
+
 \begin{mathpar}
-
 \inferrule*[right=E-Var]{x:A\in\Gamma}{\E x A x}
 
 \inferrule*[right=E-Instance]{d:A\in\Delta}{\E d A d}
 
-
-\inferrule*[right=E-Lambda]{\Gamma,x:A;\Delta\vdash e:B\rightsquigarrow c}
+\inferrule*[right=E-Lambda]{\Gamma,x:A;\Delta\vdash e\Rightarrow B\rightsquigarrow c}
  {\E{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
 
+\inferrule*[right=Check-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\lambda x.e}{A\to B}{\lam{x}{A}{c}}}
 
-\inferrule*[right=E-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e:B\rightsquigarrow c}
+\inferrule*[right=Check-Annotated-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
+
+\inferrule*[right=E-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Rightarrow B\rightsquigarrow c}
  {\E{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
 
+\inferrule*[right=Check-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
 
-\inferrule*[right=E-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e:A\rightsquigarrow c\\
+\inferrule*[right=E-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Rightarrow A\rightsquigarrow c\\
  \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
  {\E{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
 
+\inferrule*[right=Check-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Leftarrow A\rightsquigarrow c\\
+ \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
+ {\EC{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
+\end{mathpar}
 
+\begin{mathpar}
 \inferrule*[right=E-Type-App]{\E e {\forall\alpha.A} c\\\wf B}
  {\E{e[B]}{A[B/\alpha]}{c[B]}}
 
-
-\inferrule*[right=E-Implicit-App]{\E{e_1}{A\Rightarrow B}{c_1}\\\E{e_2}{A}{c_2}}
+\inferrule*[right=E-Implicit-App]{\E{e_1}{A\Rightarrow B}{c_1}\\\EC{e_2}{A}{c_2}}
  {\E{e_1\{e_2\}}{B}{c_1\{c_2\}}}
 
-
-\inferrule*[right=E-App]{\E{e_1}{T}{c_1}\\c_1:T\triangleright c'_1:A\to B\\\E{e_2}{A}{c_2}}
+\inferrule*[right=E-App]{\E{e_1}{T}{c_1}\\c_1:T\triangleright c'_1:A\to B\\\EC{e_2}{A}{c_2}}
  {\E{e_1(e_2)}{B}{c'_1\,c_2}}
 
-
-\inferrule*[right=E-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2:B\rightsquigarrow c_2}
+\inferrule*[right=E-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
  {\E{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
 
+\inferrule*[right=Check-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
+ {\EC{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
 
-\inferrule*[right=E-Impl]{\E{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2:B\rightsquigarrow c_2}
+\inferrule*[right=E-Impl]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
  {\E{\impl{d}{A}{e_1}{e_2}}{B}{\impl{d}{A}{c_1}{c_2}}}
 
+\inferrule*[right=Check-Impl]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
+ {\EC{\impl{d}{A}{e_1}{e_2}}{B}{\impl{d}{A}{c_1}{c_2}}}
 
-\inferrule*[right=E-Ascribe]{\E e A c}{\E{(e:A)}{A}{c}}
+\inferrule*[right=E-Fix]{\wf A\\\Gamma,x:A;\Delta\vdash e\Leftarrow A\rightsquigarrow c}
+ {\E{\fix{x}{A}{e}}{A}{\fix{x}{A}{c}}}
+
+\inferrule*[right=E-Ascribe]{\EC e A c}{\E{(e:A)}{A}{c}}
 
 \inferrule*[right=E-Need]{\wf A}{\E{\need A}{A}{\hole A}}
+
+\inferrule*[right=Check-Infer]{\E e A c\\e\text{ is not a checking introduction}}
+ {\EC e A c}
 \end{mathpar}
+The checking introductions are ordinary, implicit, and type lambdas, records, lets,
+and implementation bindings. They use their corresponding checking rules, including
+\textsc{Check-Record} below. Every supplied lambda annotation must equal the expected
+parameter type. Checking does not insert an ordinary, implicit, or type abstraction;
+the source determines the binder kind.
 
 \subsection*{Expose an ordinary application}
 \begin{mathpar}
@@ -475,13 +584,16 @@ An implementation initializer is elaborated in the old $\Delta$: bindings are no
 \inferrule*[right=E-Record]{\E{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
  {\E{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
 
+\inferrule*[right=Check-Record]{\EC{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
+ {\EC{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
+
 
 \inferrule*[right=E-Project]{\E e{\{\ell_j:A_j\}_{j\in J}}c\\ k\in J}
  {\E{e.\ell_k}{A_k}{c.\ell_k}}
 
 
-\inferrule*[right=E-BinOp]{\E{e_1}{\argop\odot}{c_1}\\
- \E{e_2}{\argop\odot}{c_2}}
+\inferrule*[right=E-BinOp]{\EC{e_1}{\argop\odot}{c_1}\\
+ \EC{e_2}{\argop\odot}{c_2}}
  {\E{e_1\mathbin{\odot}e_2}{\resop\odot}{c_1\mathbin{\odot}c_2}}
 \end{mathpar}
 
@@ -535,7 +647,7 @@ an ordinary function body are solved in that body's definition environment.
 
 \newpage
 \section{Admissible evidence and the synthesizer}
-Evidence constructions are a restricted subset of the unresolved core:
+Evidence constructions are a restricted subset of implicit terms:
 \[
 \boxed{p::=d\mid p[A]\mid p\,p\mid p\{p\}.}
 \]
@@ -620,12 +732,13 @@ preference is a lexical priority rule; no general coherence property is claimed.
 The implementation defaults to $N=16$, $H=8$, and a ten-second search timeout.
 These limits are configurable and do not restrict explicit evidence written by the programmer.
 
-\textbf{Type encoding.} Types and ordered field lists are algebraic datatypes in
-SMT. Existing type variables are rigid de Bruijn indices, not unification
+\textbf{Type encoding.} Types are algebraic datatypes in SMT. At this encoding boundary,
+each unordered field map is serialized in increasing label order, so datatype equality
+coincides with map equality; decoding reconstructs an unordered map. Existing type variables are rigid de Bruijn indices, not unification
 metavariables; inferred type arguments are symbolic values of the type datatype.
 At ambient depth $q$, well-formedness requires $0\le i<q$ for a variable
-$\underline i$ and increases $q$ beneath $\forall$. Record labels must be distinct
-and ordered. Type arguments may contain nested universals as well as either arrow.
+$\underline i$ and increases $q$ beneath $\forall$. The serialized labels must be distinct
+and increasing; ordering is an encoding invariant, not a property of calculus records. Type arguments may contain nested universals as well as either arrow.
 
 Instantiation removes one binder and avoids capture. If $I_k(C,B)$ substitutes
 for the binder beneath $k$ retained universals, its variable and universal cases are
@@ -690,7 +803,7 @@ bound establishes absence. Otherwise exhaustion, solver unknown (including timeo
 and native/API failures remain distinct outcomes, with the underlying reason preserved.
 
 \subsection*{First-class polymorphic implementations}
-A generic implementation may have the ordinary core type
+A type abstraction can provide an implementation of type
 \[
  i:\forall A,B.\kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
  \qquad\kw{Repr}[A,B]=\{\kw{repr}:A\to B\}.
@@ -703,7 +816,8 @@ satisfies $\Pj p{\TS[\kw{Person}]}$. The SMT synthesizer discovers the intermedi
 $B=\Str$ and this composition; the exact-lookup baseline does not. The source program
 can also construct and install it explicitly:
 \begin{lstlisting}
-impl person: ToString[Person] = via[Person, String](using personName, using string)
+instance person: { toString: Person -> String } =
+  via[Person, String](using personName, using string)
 ToString[Person]::toString({ name = "Ada" })
 \end{lstlisting}
 There is no special type of implementation values: $i,r,s$ are ordinary values,
@@ -736,6 +850,9 @@ embedded in one target namespace; freshness prevents capture.
 
 \inferrule*[right=R-Lambda]{\Gamma,x:A;\Delta\vdash c\Longrightarrow t}
  {\R{\lam{x}{A}{c}}{\lam{x}{\erase A}{t}}}
+
+\inferrule*[right=R-Fix]{\Gamma,x:A;\Delta\vdash c\Longrightarrow t}
+ {\R{\fix{x}{A}{c}}{\fix{x}{\erase A}{t}}}
 
 \inferrule*[right=R-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash c\Longrightarrow t}
  {\R{\ilam{d}{A}{c}}{\lam{d}{\erase A}{t}}}
@@ -784,18 +901,24 @@ embedded in one target namespace; freshness prevents capture.
 \begin{array}{rcl}
 T,U&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid T\to U\mid\forall\alpha.T\mid\{\ell_j:T_j\}_{j\in J}\\
 t&::=&z\mid n\mid b\mid s\mid\lam z T t\mid t\,t\mid\Lambda\alpha.t\mid t[T]\\
-&&\mid\letin z t t\mid\{\ell_j=t_j\}_{j\in J}\mid t.\ell
+&&\mid\letin z t t\mid\fix z T t\mid\{\ell_j=t_j\}_{j\in J}\mid t.\ell
  \mid t_1\mathbin{\odot}t_2\\
 H&::=&\cdot\mid H,\alpha\mid H,z:T
 \end{array}
 \]
-Target type formation is Section~1 with only the ordinary arrow. All annotations and
-type arguments must be well formed in $H$. All record labels are distinct.
+Target type formation is Section~1 with only the ordinary arrow. Every judgment assumes
+that $H$ is well formed; all annotations and type arguments must be well formed in $H$.
+All record labels are distinct. The checker follows these syntax-directed rules to infer
+the unique type of a fully annotated term. Checking against an expected type first validates
+that type and then compares it with the inferred type by structural equality.
+The public boundary validates the whole input context, including unused bindings.
+In the indexed representation, its type-variable depth is nonnegative and every environment
+type is well scoped at that depth.
 \begin{mathpar}
 
 \inferrule*[right=T-Var]{z:T\in H}{H\vdash z:T}
 
-\inferrule*[right=T-Lambda]{H,z:T\vdash t:U}{H\vdash\lam z T t:T\to U}
+\inferrule*[right=T-Lambda]{H\vdash T\;\kw{type}\\H,z:T\vdash t:U}{H\vdash\lam z T t:T\to U}
 
 \inferrule*[right=T-App]{H\vdash t_1:T\to U\\H\vdash t_2:T}{H\vdash t_1\,t_2:U}
 
@@ -810,6 +933,9 @@ type arguments must be well formed in $H$. All record labels are distinct.
 \inferrule*[right=T-Let]{H\vdash t_1:T\\H,z:T\vdash t_2:U}
  {H\vdash\letin z{t_1}{t_2}:U}
 
+
+\inferrule*[right=T-Fix]{H\vdash T\;\kw{type}\\H,z:T\vdash t:T}
+ {H\vdash\fix z T t:T}
 
 \inferrule*[right=T-Record]{H\vdash t_j:T_j\quad(j\in J)}
  {H\vdash\{\ell_j=t_j\}_{j\in J}:\{\ell_j:T_j\}_{j\in J}}
@@ -840,7 +966,7 @@ metatheory is asserted here. The synthesizer is not a trusted source of typing d
 In the implementation, ordinary and instance references have independent de Bruijn indices.
 The resolver maintains one embedding for each into the current target environment.
 Every new term binder increments all previously embedded target indices. An ordinary
-binder then extends only the $\Gamma$ embedding; an implementation binder extends only
+binder, including a fixpoint binder, then extends only the $\Gamma$ embedding; an implementation binder extends only
 the $\Delta$ embedding. A type binder weakens type indices in both environments and
 in embedded evidence. Type substitution is capture avoiding.
 
@@ -854,11 +980,20 @@ v&::=& n\mid b\mid s\mid\{\ell_j=v_j\}_{j\in J}\mid
 \end{array}
 \]
 Evaluation ignores type annotations and type arguments. Type abstraction creates a delayed
-closure; type application forces it. Records are evaluated in canonical label order.
+closure; type application forces it. Every record field is evaluated; their order is
+unspecified. Fields have no mutual scope and the calculus is pure, so well-typed record
+values, when evaluation terminates, do not depend on traversal order. Runtime records remain finite maps.
+Environments contain values; closures retain their defining environments. A fixpoint
+unfolds by substituting itself for its bound variable before evaluating the resulting term
+in the same environment. Substitution is capture avoiding under both term and type binders:
+free term references and type variables in the inserted term are weakened appropriately.
 
 \begin{mathpar}
 
 \inferrule*[right=V-Var]{\rho(z)=v}{\eval\rho z v}
+
+\inferrule*[right=V-Fix]{\eval\rho{t[(\fix z T t)/z]}{v}}
+ {\eval\rho{\fix z T t}{v}}
 
 \inferrule*[right=V-Int]{ }{\eval\rho n n}
 
@@ -901,14 +1036,26 @@ closure; type application forces it. Records are evaluated in canonical label or
  {\eval\rho{t_1\mathbin{\odot}t_2}v}
 \end{mathpar}
 
+The evaluator implements these rules with an explicit continuation stack. Each frame stores
+the remaining premises and their immutable lexical environments: application evaluates its
+function and argument before the body, lets evaluate their initializer before the continuation,
+and records evaluate every field. Moving those continuations from the host stack to data
+preserves this order and each rule's result. Fixpoint unfolding is an evaluation transition.
+Its substitution traversal suspends child transformations and reconstructs each constructor
+once those children return, preserving the same substitution equations without consuming the
+host call stack. Inserted terms are shifted to preserve their free variables, then evaluated
+according to the ordinary rules.
+
 \subsection*{Closed-program execution}
+Write $\Pi\rightsquigarrow_{\mathrm{surface}}c:A$ for the sequential declaration and
+expression elaboration specified in Section~\ref{sec:syntax}, starting in empty environments.
 \begin{mathpar}
 
 \inferrule*[right=Execute]{
- \cdot;[\,]\vdash e:A\rightsquigarrow c\\
+ \Pi\rightsquigarrow_{\mathrm{surface}}c:A\\
  \cdot;[\,]\vdash c\Longrightarrow t\\
  \cdot\vdash t:\erase A\\\eval\cdot t v}
- {e\Downarrow_{\mathcal S}v}
+ {\Pi\Downarrow_{\mathcal S}v}
 \end{mathpar}
 There is no runtime evidence search. Resolving an implementation binding produces an
 ordinary target \textsf{let}, so its value can close over ordinary runtime variables.

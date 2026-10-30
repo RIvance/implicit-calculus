@@ -1,10 +1,9 @@
 package implicitlang.core
 
-import implicitlang.{Check, Error}
-
+import implicitlang.diagnostic.Error
 import implicitlang.util.Result
 
-/** Type variables use de Bruijn indices; record fields have distinct, sorted labels. */
+/** Type variables use de Bruijn indices */
 enum Type {
   case IntType
   case StringType
@@ -13,7 +12,7 @@ enum Type {
   case Arrow(parameter: Type, result: Type)
   case Implicit(parameter: Type, result: Type)
   case Forall(body: Type)
-  case Record(fields: Vector[(String, Type)])
+  case Record(fields: Map[String, Type])
 
   def shift(amount: Int, cutoff: Int = 0): Type = this match {
     case Variable(index) if index >= cutoff => Variable(index + amount)
@@ -60,15 +59,7 @@ enum Type {
       parameter.validate(depth, allowImplicit).flatMap(_ => result.validate(depth, allowImplicit))
     }
     case Forall(body) => body.validate(depth + 1, allowImplicit)
-    case Record(fields) => {
-      for {
-        _ <- Check.distinct(fields.map(_._1))
-        _ <-
-          if fields.map(_._1) == fields.map(_._1).sorted then Result.Ok(())
-          else Result.Err(Error.NonCanonicalRecord(fields.map(_._1)))
-        _ <- Result.traverse(fields)(field => field._2.validate(depth, allowImplicit))
-      } yield ()
-    }
+    case Record(fields) => Result.traverse(fields)(_.validate(depth, allowImplicit)).map(_ => ())
     case _ => Result.Ok(())
   }
 
@@ -80,6 +71,8 @@ enum Type {
     case Arrow(parameter, result) => s"(${parameter.show} -> ${result.show})"
     case Implicit(parameter, result) => s"(${parameter.show} ~> ${result.show})"
     case Forall(body) => s"(forall. ${body.show})"
-    case Record(fields) => fields.map { case (label, tpe) => s"$label: ${tpe.show}" }.mkString("{", ", ", "}")
+    case Record(fields) => {
+      fields.toVector.sortBy(_._1).map { case (label, tpe) => s"$label: ${tpe.show}" }.mkString("{", ", ", "}")
+    }
   }
 }

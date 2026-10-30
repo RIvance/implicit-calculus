@@ -2,7 +2,7 @@
 
 type Identity = forall A. A -> A
 
-impl preserve[A]: A -> A = (value: A) => value
+instance preserve[A]: A -> A = (value: A) => value
 
 // A is instantiated with the whole universally quantified Identity type.
 let copy = summon[Identity -> Identity]

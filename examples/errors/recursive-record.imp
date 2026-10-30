@@ -1,0 +1,4 @@
+// error: RecursiveDefinitionType(r,Record(Map(l -> IntType)))
+
+def r: { l: Int } = { l = r.l + 1 }
+r

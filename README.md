@@ -1,8 +1,8 @@
 # Implicit implementation calculus
 
 A deliberately small, expression-based Scala 3 implementation of a two-context calculus.
-The readable `trait`, `impl`, `def`, and `where` syntax is retained. There is no module AST,
-module system, global instance registry, or separate concrete/surface parse tree.
+Surface traits describe record dictionaries. `implement` declares a top-level implementation;
+`instance` declares a named value for implicit search; `given` binds evidence within an expression.
 
 ## Run
 
@@ -40,7 +40,7 @@ trait ToString[A] = { toString: A -> String }
 
 type Student = { name: String, age: Int }
 
-impl student: ToString[Student] = {
+implement ToString[Student] = {
   toString = (s: Student) => "Student(" ++ s.name ++ ")"
 }
 
@@ -49,51 +49,80 @@ def display[A where ToString[A]](x: A): String = x.toString
 display[Student]({ name = "Ada", age = 21 })
 ```
 
-`Parser` builds `Expr` directly. A file is a sequence of declarations followed by a final
-expression; declarations become nested expression nodes. For example:
+`surface.Parser` produces a `Program`: a sequence of declarations followed by a final
+`SurfaceExpr`. `type`, `trait`, `implement`, `instance`, and `def` are top-level declarations.
+`SurfaceExpr` contains expressions, including `Let` and `Given` terms with explicit bodies.
+Named types and annotations use `SurfaceType`. Declarations precede the final expression
+and cannot occur inside it. Elaboration consumes the declaration data separately from the expression tree.
+
+Elaboration processes declarations in order. Type aliases and traits are expanded and
+disappear; value declarations become nested bindings around the elaborated final expression.
+The result is one `implicit.ImplicitTerm`.
+
+`type` introduces a sequential, nonrecursive alias for any ordinary type. `trait` introduces a
+constraint whose definition must expand to a record type. A trait name is allowed in a
+`where` clause, an `implement` target, or qualified member access such as `ToString[A]::toString`.
+Ordinary annotations, type arguments, `summon`, and explicit implicit parameters use ordinary
+types. Explicit dictionaries can use record types or their aliases, as in
+[the first-class dictionary example](examples/first-class.imp).
+
+| Form | Target | Name | Scope |
+| --- | --- | --- | --- |
+| `implement[A where C[A]] D[A] = expression` | A declared trait | Anonymous | Top-level declaration |
+| `instance name[A](parameters): R = expression` | Any ordinary type | Required | Top-level declaration |
+| `given name: A = expression in body` | Any ordinary type | Required | Expression body |
+
+Type parameters and value parameters are optional on `instance`; type parameters are optional
+on `implement`. Initializers can be any expression of the required type, including existing values
+and function calls. These evidence bindings are nonrecursive and visible only in their continuation.
+A named binding is also available through ordinary term references.
+
+An instance parameter list expands to a curried function type and a lambda initializer:
 
 ```text
-def display[A where ToString[A]](x: A): String = body
-rest
+instance counted[A](value: A, implicit count: Int): Counted[A] = { value = value, count = count }
+// equivalent to:
+instance counted[A]: A -> (Int ~> Counted[A]) =
+  (value: A, implicit count: Int) => { value = value, count = count }
 ```
 
-becomes the same `Expr` as:
+A clause such as `[A, B where Repr[A, B] and ToString[B]]` introduces type parameters followed by
+implicit dictionary parameters. Constraints must name declared traits and are separated by `and`.
+Type arguments inside those references are ordinary types. Type parameter clauses are supported on
+`def`, `implement`, and `instance`; `[where C]` introduces constraints without type parameters.
+For example:
 
 ```text
-let display = [A] => (implicit printer: ToString[A]) => (x: A) => (body: String)
-in rest
-```
-
-The generated implementation parameter has an unspellable internal name, not `printer`.
-`trait` and `type` introduce lexical, nonrecursive type synonyms. Both are represented by
-`Expr.TypeLet`; trait names disappear by expansion to ordinary record types.
-Implementations have one form with optional naming and an optional generic header:
-
-```text
-impl ToString[String] = value
-impl printer: ToString[String] = value
-impl [A where C[A]]: D[A] = expression
-impl derive[A where C[A]]: D[A] = expression
-```
-
-`=` is required in every form. The initializer may be any expression: a record, an existing
-value, a function call, a lambda, or a brace group. A name or generic header is followed by
-`:`; without either, the type follows `impl` directly. Thus `ToString[String]` in the first
-form is the target type, while `[A where C[A]]` introduces type parameters and constraints.
-All forms become `Expr.Impl`; an anonymous binding has an unspellable internal name.
-Both enter the implicit environment, and a named binding can also be referred to directly.
-
-A generic implementation is an ordinary polymorphic value with implicit arrows. For example:
-
-```text
-impl via[A, B where Repr[A, B] and ToString[B]]: ToString[A] = {
+implement[A, B where Repr[A, B] and ToString[B]] ToString[A] = {
   toString = (x: A) => ToString[B]::toString(Repr[A, B]::repr(x))
 }
 ```
 
-Omitting `via` makes this implementation anonymous, with the same type and initializer.
-`and` and commas both separate constraints. Comma-separated parameters and repeated parameter
-groups are curried, as are argument lists and whitespace application:
+After checking the surface restrictions, elaboration expands each trait to its structural record
+type and each type parameter clause to type abstractions followed by implicit abstractions. All evidence bindings
+become the calculus's existing implicit binding. The calculus can still quantify over, pass, return,
+and synthesize arbitrary types; trait names and declaration kinds do not reach it.
+
+A `def` has an explicit result annotation and may have zero or more parameters. Its full
+signature includes type parameters, `where` constraints, and ordinary or implicit parameters.
+If its body refers to the definition itself, elaboration binds that signature while checking
+the body and wraps the value in a fixpoint:
+
+$$
+\mathsf{let}\ f:T = \mathsf{fix}\ f:T.\,v\ \mathsf{in}\ b.
+$$
+
+This check respects parameter and local-binding shadowing. Recursive definitions must have
+an ordinary or implicit function type after leading universal quantifiers are stripped.
+For example, `def x: Int = x` and a self-referencing record definition are rejected. A definition
+without a self-reference becomes an ordinary let binding, including definitions of integers
+and records. The core fixpoint construct itself accepts any type. Fixpoints can diverge;
+the function-type restriction does not establish termination. See
+[recursive definitions](examples/recursive-definition.imp) and
+[recursive type abstraction with trait evidence](examples/recursive-type-abstraction.imp).
+
+Comma-separated parameters and repeated parameter groups are curried, as are argument lists
+and whitespace application:
 
 ```text
 def f[T](a: A, b: B): R = e    // same as def f [T] (a: A) (b: B) : R = e
@@ -102,9 +131,11 @@ f(a, b)                      // same as f(a)(b), f a b, or f a (b)
 ```
 
 Groups can be mixed, as in `def f(a: A, b: B)(c: C): R = e` and `(a: A)(b: B) => e`.
-Mark each implicit parameter individually. The same parameter grammar is used in lambdas
-and definitions. The `where` syntax for constraints remains available on definitions and
-generic implementations, including `def display[A where ToString[A]](x: A): String = x.toString`.
+Ordinary lambda annotations are optional: `x => body`, `(x, y) => body`, and
+`(x: Int, y) => body` are valid expression forms. Implicit parameters and declaration
+parameters require annotations. Mark each implicit parameter individually. The `where`
+syntax is available on `def`, `implement`, and `instance`, including
+`def display[A where ToString[A]](x: A): String = x.toString`.
 Named implicit parameters can also be mixed with ordinary parameters:
 
 ```text
@@ -123,6 +154,14 @@ implicit function until applied. Type lambdas use `[T] => body`, for example
 `[T] => (x: T) => x`. All lambda bodies use `=>`; implicit function types use `~>`.
 The mathematical notation remains `λ{d:A}` and `A ⇒ B`.
 
+Elaboration uses bidirectional typing. An unannotated lambda checks against an expected
+function type, supplied by an annotation, a declaration signature, or an argument's parameter
+type. This expectation also reaches nested lambdas and record fields. For example,
+`let add: Int -> Int -> Int = (x, y) => x + y in add(20, 1)` returns `21`.
+An unannotated let synthesizes its initializer's type; later uses do not determine that type.
+Thus `let id = x => x in id(21)` reports `MissingParameterType(x)`. A `given` always requires
+its type annotation. See [contextual lambdas](examples/contextual-lambdas.imp).
+
 Application associates to the left and binds more tightly than binary operators. Adjacent
 postfix operations bind within an argument: `f g(x)` means `f(g(x))`, while `f g (x)` means
 `f(g)(x)`. Likewise, `f x.field` passes `x.field` to `f`. Type application remains explicit
@@ -130,12 +169,12 @@ with `f[T]`; `f(using e)` supplies an implementation argument explicitly. Use `f
 for a negative argument; `f x - 1` is subtraction. `++` concatenates strings; `+` adds integers.
 
 Ordinary bindings use `let a = e in body` or `let a: A = e in body`. The typed form becomes
-`Expr.Let(a, Expr.Ascribe(e, A), body)`. No new expression node is needed.
-For `let`, `impl`, `def`, `type`, and `trait`, `in` may be replaced by a newline or `;`:
+a let binding whose initializer is ascribed the ordinary type `A`.
+For `let`, `given`, `instance`, `implement`, `def`, `type`, and `trait`, `in` may be replaced by a newline or `;`:
 
 ```text
 let answer: Int = 21
-impl selected: Int = answer
+given selected: Int = answer
 summon[Int]
 ```
 
@@ -143,11 +182,11 @@ A newline after a complete initializer separates it from the body, including a b
 with `(` or `{`. Application, projection, and binary operators do not continue across that
 newline. Line breaks are allowed where an operand or body is still required, such as after
 `=`, `=>`, or `+`, and inside argument lists such as `f(\n a,\n b\n)`.
-Comments count as whitespace; newlines inside comments also separate declarations.
-Same-line declarations require `in` or `;`.
+Comments count as whitespace; newlines inside comments also separate bindings.
+Same-line declarations and bindings require `in` or `;`.
 
 Braces group one expression just like parentheses: `{ body }` and `(body)` produce the
-same AST. The expression may contain scoped declarations:
+same AST. The expression may contain nested bindings:
 
 ```text
 let answer = {
@@ -157,15 +196,17 @@ let answer = {
 answer
 ```
 
-There is no block node or statement sequence. `f { body }` and `f{body}` are ordinary
-applications equivalent to `f(body)`. Explicit implicit arguments use `f(using value)`
+Grouping introduces no node; each `let` or `given` is an expression enclosing its continuation.
+`f { body }` and `f{body}` are ordinary applications equivalent to `f(body)`. Explicit implicit arguments use `f(using value)`
 and may themselves contain a group, as in `f(using { let x = 20 in x + 1 })`.
 Field syntax distinguishes record literals such as `{ value = 21 }` from grouped expressions;
 `{}` remains the empty record. A record can be passed as an ordinary argument with
 `f { value = 21 }` or as an explicit implicit argument with `f(using { value = 21 })`.
 
 Record types and values require commas, semicolons, or newlines between fields; spaces alone
-do not separate fields. A trailing field separator is allowed.
+do not separate fields. A trailing field separator is allowed. Records are immutable maps in
+the syntax, both calculi, and evaluated values. Field order does not affect equality; duplicate
+labels are rejected by the parser. Display output sorts labels for readability.
 
 ## Two term environments
 
@@ -177,18 +218,18 @@ Type variables have a separate de Bruijn depth, not another evidence environment
 single de Bruijn environment of `Term`, weakening existing references at every binder.
 Type abstraction weakens the types in both environments.
 
-An `impl` is a *scoped binding of a value*, not a global registration:
+A `given` makes a value available in its expression body:
 
 ```text
-def install(chosen: ToString[String]): String = {
-  impl active: ToString[String] = chosen in
+def install(chosen: { toString: String -> String }): String = {
+  given active: { toString: String -> String } = chosen in
   ToString[String]::toString("Ada")
 }
 ```
 
 Implementations can be returned, stored in records, passed as ordinary arguments, referred
-to by name, or supplied through `f(using e)`. Only binding a value with `impl` (or an implicit
-lambda) makes it available to search. A value in Γ is never implicitly registered.
+to by name, or supplied through `f(using e)`. Binding a value with `implement`, `instance`, `given`, or an implicit
+lambda makes it available to search. A value in Γ is never implicitly registered.
 Implementation bindings are nonrecursive. Functions capture the implementations in their
 lexical definition scope; an inner implementation cannot retroactively change a closure.
 
@@ -196,11 +237,11 @@ lexical definition scope; an inner implementation cannot retroactively change a 
 
 ```text
 text
-  -> Parser       -> Expr                 named expression AST, including Impl and TypeLet
-  -> Elaborator   -> ImplicitTerm + Type  two variable spaces, implicit arrows, Need goals
-  -> Resolver     -> Term                 ordinary System F with records; no implicit syntax
-  -> Term.infer                           independent explicit-target check
-  -> Evaluator                            call-by-value closure semantics
+  -> surface.Parser      -> surface.Program
+  -> surface.Elaborator  -> implicit.ImplicitTerm + Type
+  -> resolution.Resolver -> core.Term
+  -> core.TypeChecker.check    independent explicit-target check
+  -> core.Evaluator         call-by-value evaluation
 ```
 
 Name/type elaboration never invokes the synthesizer. It expands synonyms, resolves names,
@@ -210,14 +251,14 @@ lookup does not eagerly force an implicit function. An explicit `f(using e)` doe
 Type applications are not inferred and do not automatically pass intervening implicit arrows.
 
 `ToString[A]::toString(x)` selects a member of an implementation requested for `ToString[A]`.
-In general, `P::member` means `summon[P].member`: the parser constructs
-`Expr.Select(Expr.Need(P), member)` and resolves `P` in the type namespace during elaboration.
+The parser retains `P::member` as a qualified selection. Elaboration resolves `P` as a trait
+reference or an ordinary type, requests its expanded dictionary type, and selects the member.
 Types are not term values: a bare `ToString[A]` or `ToString[A].toString` is invalid when
-`ToString` names a type. An implementation value can be requested explicitly with
-`summon[ToString[A]]`. Ordinary values, including values with the same spelling as a type,
-use dotted selection.
+`ToString` names a trait. An explicit dictionary value can be requested using its ordinary
+record type, for example `summon[{ toString: A -> String }]`. Ordinary values, including values
+with the same spelling as a type, use dotted selection.
 
-Every `x.method` parses as `Expr.Select(x, method)` for any receiver expression; the raw
+Every `x.method` parses as `SurfaceExpr.Select(x, method)` for any receiver expression; the raw
 AST has no `Proj`. Elaboration first checks the receiver's type and tries an actual record
 field. If found, it emits `ImplicitTerm.Proj`. Otherwise it uses the unique record **type**
 in Δ whose `method` field has type `typeOf(x) -> R`, generating a deferred request for that
@@ -269,30 +310,38 @@ no instantiation or composition and is not a fallback for SMT failure.
 
 ## Organization
 
-The calculus is small; the project is not flattened. Each package owns a distinct
-semantic responsibility. The parser returns `Expr` directly (no concrete-syntax AST),
-and declarations are scoped expressions rather than a module system.
+The surface, implicit, and core representations have distinct contracts. Parsing preserves
+declarations and unresolved names; elaboration produces one term with deferred evidence requests;
+resolution supplies evidence and merges the two binding spaces into an explicit core term.
 
 ```text
 src/main/scala/implicitlang/
-  syntax/         Expr.scala, OpKind.scala
-  parser/         Parser.scala
-  core/           Type.scala, ImplicitTerm.scala, Term.scala
-  elaboration/    Elaborator.scala
+  surface/        Program.scala, SurfaceExpr.scala, SurfaceType.scala, Parser.scala, Elaborator.scala
+  implicit/       ImplicitTerm.scala
+  core/           Type.scala, Term.scala, OpKind.scala, TypeChecker.scala, Evaluator.scala
+  diagnostic/     Error.scala
   synthesis/      Synthesizer.scala, NaiveSynthesizer.scala, SmtSynthesizer.scala, SmtTypes.scala
   resolution/     Resolver.scala
-  evaluation/     Evaluator.scala
   cli/            Main.scala  (Pipeline, Main)
-  Error.scala     errors and small checking helpers
-src/main/scala/implicitlang/util/Result.scala
+  util/           Result.scala
 src/test/scala/implicitlang/CalculusTests.scala
 docs/calculus.tex
 docs/calculus.pdf
 examples/*.imp
 ```
 
-The syntax, typing/elaboration, evidence search, lowering, and runtime are separate
-without introducing modules, a framework, or extra AST layers. Cross-cutting recoverable errors use `implicitlang.util.Result[T,E]`.
+`core.TypeChecker.infer(term, environment, typeDepth)` returns the type of a fully annotated
+core term. `check(term, expected, environment, typeDepth)` validates it against an expected type.
+The environment is nearest-first; `typeDepth` counts free type variables. Both operations validate
+the entire input context, including unused entries. They enforce the core typing rules for
+functions, explicit type abstraction and application, lets, records, primitives, and unrestricted
+fixpoints. The resolver uses the same checker for its final result and synthesized evidence.
+
+The evaluator uses standard call-by-value closures over immutable value environments.
+A fixpoint unfolds by capture-avoiding substitution:
+`fix x:T.e` evaluates `e[fix x:T.e/x]` in the same environment.
+The explicit continuation stack and suspended substitution traversals keep deep term evaluation
+from consuming the host call stack. Captured environments remain unchanged across evaluations.
 
 ## Primitive operators
 
@@ -329,10 +378,11 @@ SMT composition and polymorphism, search limits, final checking, and replacement
 ## Deliberate boundaries
 
 No subtyping, existential types, nominal class identities, modules, forward references,
-recursive bindings, higher-kinded types, datatype declarations, automatic generalization,
+mutually recursive declarations, higher-kinded types, datatype declarations, automatic generalization,
 or general type inference. Definitions are lexical and sequential; use before declaration
-is rejected. Traits are transparent record synonyms, so structurally identical trait types
-are equal. Record labels are unique and canonicalized. Integers are arbitrary precision.
+is rejected. Trait constraints expand to structural record types, so constraints with identical
+expanded dictionaries share evidence. Trait names do not introduce nominal type identities.
+Record labels are unique and unordered. Integers are arbitrary precision.
 The calculus is pure. Its primitive binary operators are integer `+`, `-`, `*`, `==`, `<`, `>` and
 string `++`. The comparison operators return `Bool`. There is no built-in integer-to-string
 conversion: a printer for integers is a separate library concern, not a primitive expression.

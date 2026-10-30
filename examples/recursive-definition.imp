@@ -1,0 +1,8 @@
+// result: 21
+
+// The callback chooses whether to invoke the recursive continuation.
+def run(step: (Int -> Int) -> Int): Int = {
+  step((value: Int) => run((ignored: Int -> Int) => value))
+}
+
+run((again: Int -> Int) => again(21))

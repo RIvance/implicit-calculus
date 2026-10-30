@@ -3,7 +3,7 @@
 trait ToString[A] = { toString: A -> String }
 type Person = { name: String }
 
-impl printer: ToString[Person] = {
+implement ToString[Person] = {
   toString = (p: Person) => p.name
 }
 

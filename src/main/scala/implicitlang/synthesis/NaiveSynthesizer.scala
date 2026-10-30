@@ -1,9 +1,9 @@
 package implicitlang.synthesis
 
+import implicitlang.`implicit`.ImplicitTerm
+import implicitlang.core.Type
+import implicitlang.diagnostic.Error
 import implicitlang.util.Result
-
-import implicitlang.Error
-import implicitlang.core.{ImplicitTerm, Type}
 
 /** Baseline: nearest matching instance in Δ. No instantiation or composition. */
 final class NaiveSynthesizer extends Synthesizer {
