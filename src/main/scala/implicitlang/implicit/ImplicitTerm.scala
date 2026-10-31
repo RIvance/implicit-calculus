@@ -4,7 +4,7 @@ import implicitlang.core.{Type, OpKind}
 
 /**
  * Two independent de Bruijn spaces: Var indexes Γ, Instance indexes Δ.
- * Binder hints retain source spelling for presentation; binding and typing use only indices.
+ * Name hints retain source spelling and evidence origins for presentation; binding and typing use only indices.
  */
 enum ImplicitTerm {
   case Var(index: Int)
@@ -18,7 +18,7 @@ enum ImplicitTerm {
   case Let(valueType: Type, value: ImplicitTerm, body: ImplicitTerm, nameHint: Option[String] = None)
   case Fix(valueType: Type, body: ImplicitTerm, nameHint: Option[String] = None)
   case Impl(valueType: Type, value: ImplicitTerm, body: ImplicitTerm, nameHint: Option[String] = None)
-  case Need(goal: Type)
+  case Need(goal: Type, nameHint: Option[String] = None)
   case IntLit(value: BigInt)
   case StringLit(value: String)
   case BoolLit(value: Boolean)
@@ -28,3 +28,13 @@ enum ImplicitTerm {
 }
 
 final case class Elaborated(expression: ImplicitTerm, tpe: Type)
+
+/** Identifies an occurrence within one elaborated term, independently of record traversal order. */
+final case class TermLocation(steps: Vector[TermChild] = Vector.empty) {
+  def /(child: TermChild): TermLocation = TermLocation(steps :+ child)
+}
+
+enum TermChild {
+  case Body, Value, Function, Argument, Receiver, Left, Right
+  case Field(label: String)
+}

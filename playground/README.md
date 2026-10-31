@@ -35,7 +35,8 @@ browser loads these assets from the same host as the site.
   or errors, import a `.imp` file, or start a new document. Example headings describe expected
   outcomes; displayed execution results come from running the source.
 - Edit with syntax highlighting, completion, keyword help, parser diagnostics, find, folding,
-  and Monaco's command palette. Press Ctrl/⌘ + Enter to run.
+  and Monaco's command palette. Run and search settings are in the editor header; its source actions
+  menu provides import, export, sharing, and restore. Press Ctrl/⌘ + Enter to run.
 - Select each synthesis goal and inspect its lexical Δ, surrounding Γ, and rigid type variables.
   Select a graph node to inspect the instance head, inferred type arguments, implicit dependencies,
   and corresponding constraints. Pan, zoom, and use the minimap to navigate larger constructions.
@@ -43,9 +44,10 @@ browser loads these assets from the same host as the site.
   export a complete solver query, including datatype declarations and recursive definitions.
 - Inspect structured assignments or the raw model. The model view identifies the record-label
   encoding and any additional type-validity constraints required by a provisional candidate.
-- Step through or play back search attempts, inspect solver statistics, adjust construction
-  and type-height bounds, and compare SMT synthesis with nearest exact lookup on the same source.
-- Inspect implicit and core terms, compile without evaluation, export the source or complete
+- Step through or play back search attempts, inspect solver statistics, and adjust construction
+  and type-height bounds.
+- Inspect named goals in the unresolved term, hover for their results, and select their synthesis details.
+- Inspect the core term, compile without evaluation, export the source or complete
   report, restore source from run history, and share source through a compressed URL fragment.
   The draft and history are stored in this browser. Source edits mark existing results as stale.
 
@@ -60,10 +62,10 @@ then checked by the resolver, and the resulting core term passes the independent
 The goal's **Checked** indicator records that validation; **Accepted model** records the
 earlier synthesis step. Model assignments can include unused argument slots.
 
-Exact lookup can resolve a goal without an SMT query. Bound exhaustion, proven absence in
+A matching instance can resolve a goal without an SMT query. Bound exhaustion, proven absence in
 the finite fragment, solver unknown, backend failure, and cancellation remain distinct outcomes.
 Composite solutions need not be unique, so different backends or runs may find different
-valid constructions. The comparison runs both strategies with evaluation disabled.
+valid constructions.
 
 The per-goal search budget covers query construction, checks, and refinement. The execution
 timeout bounds the whole worker run, including evaluation. **Stop** terminates that worker
@@ -123,7 +125,7 @@ npm run test:e2e
 ```
 
 The compiler tests discover the example directory and run the Scala.js/WebAssembly pipeline.
-Playwright exercises editing, real synthesis, query export, graphs, models, playback, comparison,
+Playwright exercises editing, real synthesis, query export, graphs, models, playback,
 sharing, history, cancellation, bound changes, execution timeouts, and responsive layouts.
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing Chromium executable, or install
 Playwright's Chromium with a project-local browser directory:

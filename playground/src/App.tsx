@@ -8,9 +8,9 @@ import {
   Drawer,
   Group,
   Loader,
+  Menu,
   Modal,
   NumberInput,
-  SegmentedControl,
   Select,
   Slider,
   Switch,
@@ -22,8 +22,6 @@ import {
 import { useMediaQuery } from '@mantine/hooks';
 import { Group as PanelGroup, Panel, Separator } from 'react-resizable-panels';
 import {
-  ArrowLeftRight,
-  ArrowRight,
   BookOpen,
   Check,
   ChevronLeft,
@@ -31,6 +29,7 @@ import {
   Code2,
   Command,
   Download,
+  Ellipsis,
   FileCode2,
   FolderOpen,
   HelpCircle,
@@ -47,14 +46,14 @@ import {
   Square,
   Sun,
   Upload,
-  X,
 } from 'lucide-react';
 import type { editor } from 'monaco-editor';
-import type { Analysis, GoalResult, Progress, RunOptions, RunResult } from '../bridge/protocol';
+import type { Analysis, GoalResult, Language, Progress, RunOptions, RunResult } from '../bridge/protocol';
 import { CompilerClient, Interrupted } from './compiler-client';
 import { examples } from './examples';
 import { download, draftKey, historyKey, shareDocument, type DocumentState, type HistoryEntry } from './document';
 import { SourceEditor } from './SourceEditor';
+import { UnresolvedTerm, goalName } from './UnresolvedTerm';
 import { Library } from './Library';
 import { EvidenceGraph } from './EvidenceGraph';
 import { ConstraintExplorer, CopyButton, ModelExplorer, SearchTrace } from './Inspectors';
@@ -99,13 +98,12 @@ export function App({
   const [phase, setPhase] = useState('');
   const [runtime, setRuntime] = useState<RuntimeState>('loading');
   const [solverVersion, setSolverVersion] = useState('');
-  const [keywords, setKeywords] = useState<string[]>([]);
+  const [language, setLanguage] = useState<Language>({ keywords: [], primitiveTypes: [], literals: [] });
   const [notice, setNotice] = useState(initialNotice ?? '');
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareUrl, setShareUrl] = useState('');
-  const [comparison, setComparison] = useState<{ exact: RunResult; smt?: RunResult } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(initialHistory);
   const [wrap, setWrap] = useState(true);
   const [fontSize, setFontSize] = useState(14);
@@ -126,7 +124,7 @@ export function App({
       client.current = next;
       next.language
         .then((info) => {
-          if (client.current === next) setKeywords(info.keywords);
+          if (client.current === next) setLanguage(info);
         })
         .catch((error: unknown) => {
           if (client.current === next) setNotice(error instanceof Error ? error.message : String(error));
@@ -163,7 +161,7 @@ export function App({
 
   useEffect(() => {
     setSaving('saving');
-    const timer = setTimeout(() => {
+    const save = () => {
       try {
         localStorage.setItem(draftKey, JSON.stringify(document));
         setSaving('saved');
@@ -171,8 +169,13 @@ export function App({
         setSaving('failed');
         setNotice('The browser could not save this draft. Export the source to keep a copy.');
       }
-    }, 300);
-    return () => clearTimeout(timer);
+    };
+    const timer = setTimeout(save, 300);
+    window.addEventListener('pagehide', save);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('pagehide', save);
+    };
   }, [document]);
 
   useEffect(() => {
@@ -207,7 +210,6 @@ export function App({
   const editedExample = selectedExample && selectedExample.source !== document.source;
   const checkedCount = goals.filter((goal) => goal.validated).length;
   const totalAttempts = goals.reduce((sum, goal) => sum + goal.synthesis.attempts.length, 0);
-  const stageAnalysis = runSource === null ? analysis : runAnalysis;
 
   useEffect(() => {
     if (followLatest) setSelectedAttempt(Math.max(0, attempts.length - 1));
@@ -242,129 +244,107 @@ export function App({
     });
   }
 
-  const run = useCallback(
-    async (compare = false) => {
-      if (busy) return;
-      const worker = runtime === 'ready' || runtime === 'loading' ? client.current : connect();
-      if (!worker) return;
-      const identity = ++activeRun.current;
-      const snapshot = { ...document };
-      const settings = { ...options, evaluate: compare ? false : options.evaluate };
-      setRunOptions(compare ? { ...settings, mode: 'smt' } : settings);
-      setRunAnalysis(null);
-      setBusy(true);
-      setResult(null);
-      setRunSource(snapshot.source);
-      setGoals([]);
-      setSelectedGoal(0);
-      setSelectedAttempt(0);
-      setSelectedSpine(null);
-      setFollowLatest(true);
-      setPlaying(false);
-      setComparison(null);
-      setPhase(compare ? 'Exact lookup' : options.mode === 'smt' ? 'Resolving evidence' : 'Exact lookup');
+  const run = useCallback(async () => {
+    if (busy) return;
+    const worker = runtime === 'ready' || runtime === 'loading' ? client.current : connect();
+    if (!worker) return;
+    const identity = ++activeRun.current;
+    const snapshot = { ...document };
+    const settings = { ...options };
+    setRunOptions(settings);
+    setRunAnalysis(null);
+    setBusy(true);
+    setResult(null);
+    setRunSource(snapshot.source);
+    setGoals([]);
+    setSelectedGoal(0);
+    setSelectedAttempt(0);
+    setSelectedSpine(null);
+    setFollowLatest(true);
+    setPlaying(false);
+    setPhase('Resolving evidence');
 
-      const progress = (event: Progress) => {
-        if (activeRun.current !== identity) return;
-        if (event.kind === 'stage') {
-          setPhase(
-            { preparing: 'Parsing and elaborating', resolving: 'Resolving evidence', evaluating: 'Evaluating' }[
-              event.stage
-            ],
-          );
-        } else if (event.kind === 'prepared') {
-          setRunAnalysis(event.analysis);
-          if (source.current === snapshot.source) setAnalysis(event.analysis);
-        } else if (event.kind === 'goal') {
-          setGoals((previous) => {
-            const next = [...previous];
-            next[event.goalIndex] = {
-              request: event.goal,
-              validated: false,
-              pending: true,
-              synthesis: { ok: false, term: null, diagnostic: null, attempts: [], evidence: null },
-            };
-            return next;
-          });
-        } else if (event.kind === 'attempt') {
-          setGoals((previous) =>
-            previous.map((goal, index) =>
-              index === event.goalIndex
-                ? {
-                    ...goal,
-                    synthesis: { ...goal.synthesis, attempts: [...goal.synthesis.attempts, event.attempt] },
-                  }
-                : goal,
-            ),
-          );
-        } else {
-          setGoals((previous) =>
-            previous.map((goal, index) =>
-              index === event.goalIndex
-                ? {
-                    ...goal,
-                    synthesis: event.report,
-                    pending: false,
-                  }
-                : goal,
-            ),
-          );
-        }
+    const progress = (event: Progress) => {
+      if (activeRun.current !== identity) return;
+      if (event.kind === 'stage') {
+        setPhase(
+          { preparing: 'Parsing and elaborating', resolving: 'Resolving evidence', evaluating: 'Evaluating' }[
+            event.stage
+          ],
+        );
+      } else if (event.kind === 'prepared') {
+        setRunAnalysis(event.analysis);
+        if (source.current === snapshot.source) setAnalysis(event.analysis);
+      } else if (event.kind === 'goal') {
+        setGoals((previous) => {
+          const next = [...previous];
+          next[event.goalIndex] = {
+            request: event.goal,
+            validated: false,
+            pending: true,
+            synthesis: { ok: false, term: null, diagnostic: null, attempts: [], evidence: null },
+          };
+          return next;
+        });
+      } else if (event.kind === 'attempt') {
+        setGoals((previous) =>
+          previous.map((goal, index) =>
+            index === event.goalIndex
+              ? {
+                  ...goal,
+                  synthesis: { ...goal.synthesis, attempts: [...goal.synthesis.attempts, event.attempt] },
+                }
+              : goal,
+          ),
+        );
+      } else {
+        setGoals((previous) =>
+          previous.map((goal, index) =>
+            index === event.goalIndex
+              ? {
+                  ...goal,
+                  synthesis: event.report,
+                  pending: false,
+                }
+              : goal,
+          ),
+        );
+      }
+    };
+    let acceptingProgress = true;
+    try {
+      const completed = await worker.run(
+        snapshot.source,
+        settings,
+        (event) => {
+          if (acceptingProgress) progress(event);
+        },
+        executionTimeout,
+      );
+      if (activeRun.current !== identity) return;
+      setResult(completed);
+      setRunAnalysis(completed.analysis ?? null);
+      if (completed.analysis && source.current === snapshot.source) setAnalysis(completed.analysis);
+      setGoals(completed.goals ?? []);
+      record(snapshot, settings, completed);
+    } catch (error) {
+      if (activeRun.current !== identity) return;
+      const diagnostic = {
+        code: error instanceof Interrupted ? error.code : 'ExecutionFailure',
+        message: error instanceof Error ? error.message : String(error),
       };
-      async function execute(mode: RunOptions['mode']) {
-        let acceptingProgress = true;
-        try {
-          return await worker!.run(
-            snapshot.source,
-            { ...settings, mode },
-            (event) => {
-              if (acceptingProgress) progress(event);
-            },
-            executionTimeout,
-          );
-        } finally {
-          acceptingProgress = false;
-        }
+      setResult({ ok: false, diagnostic });
+      worker.dispose();
+      client.current = null;
+      setRuntime('idle');
+    } finally {
+      acceptingProgress = false;
+      if (activeRun.current === identity) {
+        setBusy(false);
+        setPhase('');
       }
-      try {
-        let completed: RunResult;
-        if (compare) {
-          const exact = await execute('exact');
-          if (activeRun.current !== identity) return;
-          setComparison({ exact });
-          setGoals([]);
-          setSelectedGoal(0);
-          setSelectedAttempt(0);
-          setPhase('SMT synthesis');
-          completed = await execute('smt');
-          if (activeRun.current !== identity) return;
-          setComparison({ exact, smt: completed });
-        } else {
-          completed = await execute(settings.mode);
-        }
-        if (activeRun.current !== identity) return;
-        setResult(completed);
-        setGoals(completed.goals ?? []);
-        record(snapshot, compare ? { ...settings, mode: 'smt' } : settings, completed);
-      } catch (error) {
-        if (activeRun.current !== identity) return;
-        const diagnostic = {
-          code: error instanceof Interrupted ? error.code : 'ExecutionFailure',
-          message: error instanceof Error ? error.message : String(error),
-        };
-        setResult({ ok: false, diagnostic });
-        worker.dispose();
-        client.current = null;
-        setRuntime('idle');
-      } finally {
-        if (activeRun.current === identity) {
-          setBusy(false);
-          setPhase('');
-        }
-      }
-    },
-    [busy, runtime, connect, document, options, executionTimeout],
-  );
+    }
+  }, [busy, runtime, connect, document, options, executionTimeout]);
 
   function cancel() {
     activeRun.current += 1;
@@ -482,101 +462,31 @@ export function App({
           </div>
         </aside>
         <main className="workbench">
-          <div className="workbench-toolbar">
-            <Group gap="xs">
-              <Button
-                className="library-trigger"
-                size="xs"
-                variant="subtle"
-                color="gray"
-                leftSection={<FolderOpen size={15} />}
-                onClick={() => setLibraryOpen(true)}
-              >
-                Programs
-              </Button>
-              <SegmentedControl
-                size="xs"
-                value={options.mode}
-                onChange={(value) => setOptions((previous) => ({ ...previous, mode: value as 'smt' | 'exact' }))}
-                data={[
-                  { value: 'smt', label: 'SMT synthesis' },
-                  { value: 'exact', label: 'Exact lookup' },
-                ]}
-              />
-              <Tooltip label="Configure search bounds">
-                <Button
-                  aria-label="Search settings"
-                  variant="subtle"
-                  size="xs"
-                  color="gray"
-                  leftSection={<SlidersHorizontal size={14} />}
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  N {options.maximumSteps}
-                  <span className="toolbar-divider">·</span>H {options.maximumTypeDepth}
-                </Button>
-              </Tooltip>
-            </Group>
-            <Group gap="xs">
-              <Tooltip label="Compare exact lookup and SMT on this program">
-                <Button
-                  size="xs"
-                  variant="default"
-                  leftSection={<ArrowLeftRight size={14} />}
-                  disabled={busy}
-                  onClick={() => void run(true)}
-                >
-                  Compare search
-                </Button>
-              </Tooltip>
-              {busy ? (
-                <Button size="xs" color="red" variant="light" leftSection={<Square size={13} />} onClick={cancel}>
-                  Stop
-                </Button>
-              ) : (
-                <Button
-                  size="xs"
-                  color="teal"
-                  leftSection={<Play size={14} fill="currentColor" />}
-                  onClick={() => void run()}
-                >
-                  {options.evaluate ? 'Run program' : 'Compile'}
-                  <kbd>⌘ ↵</kbd>
-                </Button>
-              )}
-            </Group>
-          </div>
-          {comparison && (
-            <div className="comparison-strip">
-              <ArrowLeftRight size={16} />
-              <strong>Same program, two searches</strong>
-              <span className={comparison.exact.ok ? 'positive' : 'muted'}>
-                Exact: {comparison.exact.ok ? 'resolved' : comparison.exact.diagnostic?.code}
-                {comparison.exact.elapsedMillis !== undefined && ` · ${comparison.exact.elapsedMillis.toFixed(1)} ms`}
-              </span>
-              <ArrowRight size={13} />
-              <span className={comparison.smt?.ok ? 'positive' : 'muted'}>
-                SMT: {comparison.smt ? (comparison.smt.ok ? 'resolved' : comparison.smt.diagnostic?.code) : 'searching'}
-                {comparison.smt?.elapsedMillis !== undefined && ` · ${comparison.smt.elapsedMillis.toFixed(1)} ms`}
-              </span>
-              <ActionIcon variant="subtle" size="xs" aria-label="Close comparison" onClick={() => setComparison(null)}>
-                <X size={12} />
-              </ActionIcon>
-            </div>
-          )}
           <PanelGroup
             orientation={stacked ? 'vertical' : 'horizontal'}
             className="workspace-panels"
             id={stacked ? 'stacked' : 'wide'}
           >
-            <Panel id="editor" defaultSize="45%" minSize={stacked ? '280px' : '300px'} className="source-panel">
+            <Panel id="editor" defaultSize="45%" minSize={stacked ? '450px' : '300px'} className="source-panel">
               <div className="panel-title editor-title">
-                <Group gap="xs">
-                  <FileCode2 size={15} />
+                <Group gap={8} wrap="nowrap" className="source-document">
+                  <Tooltip label="Programs">
+                    <ActionIcon
+                      className="library-trigger"
+                      size="sm"
+                      variant="subtle"
+                      color="gray"
+                      aria-label="Programs"
+                      onClick={() => setLibraryOpen(true)}
+                    >
+                      <FolderOpen size={15} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <FileCode2 size={15} className="source-file-icon" />
                   <strong title={document.name}>{document.name}</strong>
                   {editedExample && <span className="unsaved-dot" title="Edited example" />}
                 </Group>
-                <Group gap={2}>
+                <Group gap={4} wrap="nowrap" className="editor-actions">
                   <Tooltip label="Find in source">
                     <ActionIcon
                       variant="subtle"
@@ -588,69 +498,77 @@ export function App({
                       <Search size={14} />
                     </ActionIcon>
                   </Tooltip>
-                  <Tooltip label="Editor command palette">
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      size="sm"
-                      aria-label="Editor command palette"
-                      onClick={() => void editor.current?.getAction('editor.action.quickCommand')?.run()}
-                    >
-                      <Command size={14} />
-                    </ActionIcon>
-                  </Tooltip>
-                  {selectedExample && (
-                    <Tooltip label="Restore original example">
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        size="sm"
-                        aria-label="Restore original example"
-                        onClick={() => setDocument({ name: selectedExample.path, source: selectedExample.source })}
-                      >
-                        <RotateCcw size={14} />
+                  <Menu position="bottom-end" withinPortal>
+                    <Menu.Target>
+                      <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Source actions">
+                        <Ellipsis size={16} />
                       </ActionIcon>
-                    </Tooltip>
+                    </Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Item
+                        leftSection={<Command size={14} />}
+                        onClick={() => void editor.current?.getAction('editor.action.quickCommand')?.run()}
+                      >
+                        Editor command palette
+                      </Menu.Item>
+                      {selectedExample && (
+                        <Menu.Item
+                          leftSection={<RotateCcw size={14} />}
+                          onClick={() => setDocument({ name: selectedExample.path, source: selectedExample.source })}
+                        >
+                          Restore original example
+                        </Menu.Item>
+                      )}
+                      <Menu.Divider />
+                      <Menu.Item leftSection={<Upload size={14} />} onClick={() => upload.current?.click()}>
+                        Import source
+                      </Menu.Item>
+                      <Menu.Item
+                        leftSection={<Download size={14} />}
+                        onClick={() => download(document.name.split('/').at(-1) ?? 'program.imp', document.source)}
+                      >
+                        Export source
+                      </Menu.Item>
+                      <Menu.Item
+                        leftSection={<Share2 size={14} />}
+                        onClick={() => {
+                          shareDocument(document)
+                            .then(setShareUrl)
+                            .catch(() =>
+                              setNotice('The browser could not create a share link. Export the source instead.'),
+                            );
+                        }}
+                      >
+                        Share program
+                      </Menu.Item>
+                    </Menu.Dropdown>
+                  </Menu>
+                  <Tooltip label={`Search settings · N ${options.maximumSteps} · H ${options.maximumTypeDepth}`}>
+                    <ActionIcon
+                      aria-label="Search settings"
+                      variant="subtle"
+                      size="sm"
+                      color="gray"
+                      onClick={() => setSettingsOpen(true)}
+                    >
+                      <SlidersHorizontal size={15} />
+                    </ActionIcon>
+                  </Tooltip>
+                  {busy ? (
+                    <Button size="xs" color="red" variant="light" leftSection={<Square size={13} />} onClick={cancel}>
+                      Stop
+                    </Button>
+                  ) : (
+                    <Button
+                      size="xs"
+                      color="teal"
+                      aria-label={options.evaluate ? 'Run program' : 'Compile'}
+                      leftSection={<Play size={14} fill="currentColor" />}
+                      onClick={() => void run()}
+                    >
+                      {options.evaluate ? 'Run' : 'Compile'}
+                    </Button>
                   )}
-                  <Tooltip label="Import source">
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      size="sm"
-                      aria-label="Import source"
-                      onClick={() => upload.current?.click()}
-                    >
-                      <Upload size={14} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Export source">
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      size="sm"
-                      aria-label="Export source"
-                      onClick={() => download(document.name.split('/').at(-1) ?? 'program.imp', document.source)}
-                    >
-                      <Download size={14} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Share program">
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      size="sm"
-                      aria-label="Share program"
-                      onClick={() => {
-                        shareDocument(document)
-                          .then(setShareUrl)
-                          .catch(() =>
-                            setNotice('The browser could not create a share link. Export the source instead.'),
-                          );
-                      }}
-                    >
-                      <Share2 size={14} />
-                    </ActionIcon>
-                  </Tooltip>
                 </Group>
               </div>
               <div className="source-editor">
@@ -658,7 +576,7 @@ export function App({
                   source={document.source}
                   onChange={(source) => setDocument((previous) => ({ ...previous, source }))}
                   analysis={analysis}
-                  keywords={keywords}
+                  language={language}
                   dark={colorScheme === 'dark'}
                   wrap={wrap}
                   fontSize={fontSize}
@@ -758,7 +676,7 @@ export function App({
               </section>
             </Panel>
             <Separator className="panel-separator" />
-            <Panel id="research" minSize={stacked ? '480px' : '360px'} className="research-panel">
+            <Panel id="research" minSize={stacked ? '560px' : '360px'} className="research-panel">
               <div className="panel-title">
                 <Group gap="xs">
                   <ListFilter size={16} />
@@ -793,22 +711,17 @@ export function App({
                   </Tooltip>
                 </Group>
               </div>
-              <div className="pipeline">
-                <span className={stageAnalysis && stageAnalysis.diagnostic?.code !== 'Parse' ? 'complete' : ''}>
-                  Parse
-                </span>
-                <ArrowRight size={12} />
-                <span className={stageAnalysis?.ok ? 'complete' : ''}>Elaborate</span>
-                <ArrowRight size={12} />
-                <span className={result?.coreTerm ? 'complete' : busy ? 'active' : ''}>Resolve</span>
-                <ArrowRight size={12} />
-                <span className={result?.value != null ? 'complete' : ''}>Evaluate</span>
-                {goals.length > 0 && (
-                  <small>
-                    {checkedCount} checked · {totalAttempts} SMT checks
-                  </small>
-                )}
-              </div>
+              {goals.length > 0 && runAnalysis?.unresolvedTerm && (
+                <UnresolvedTerm
+                  parts={runAnalysis.unresolvedTerm}
+                  goals={goals}
+                  selected={goalIndex}
+                  onSelect={(index) => {
+                    chooseGoal(index);
+                    setResearchTab('evidence');
+                  }}
+                />
+              )}
               {goals.length > 0 && (
                 <div className="goal-picker">
                   <Select
@@ -817,7 +730,7 @@ export function App({
                     onChange={(value) => chooseGoal(Number(value))}
                     data={goals.map((goal, index) => ({
                       value: String(index),
-                      label: `Goal ${index + 1} · ${goal.request.type}`,
+                      label: `${goalName(runAnalysis?.unresolvedTerm, goal.request.location)} : ${goal.request.type}`,
                     }))}
                     searchable
                   />
@@ -839,7 +752,9 @@ export function App({
                 <Accordion className="context-accordion" variant="default">
                   <Accordion.Item value="scope">
                     <Accordion.Control>
-                      <span className="goal-judgment">Δ ⊢ ? : {goal.request.type}</span>
+                      <span className="goal-judgment">
+                        Δ ⊢ {goalName(runAnalysis?.unresolvedTerm, goal.request.location)} : {goal.request.type}
+                      </span>
                       <span className="context-count">{goal.request.instances.length} instances in scope</span>
                     </Accordion.Control>
                     <Accordion.Panel>
@@ -981,7 +896,7 @@ export function App({
                       </div>
                       {result?.ok && (
                         <div className="callout">
-                          This program has no implicit goals. Its elaborated and core terms are available in Terms.
+                          This program has no implicit goals. Its core term is available in Terms.
                         </div>
                       )}
                       <Button variant="light" mt="lg" onClick={() => setGuideOpen(true)}>
@@ -1010,16 +925,6 @@ export function App({
                 <Tabs.Panel value="terms">
                   <div className="inspector term-inspector">
                     <Group justify="space-between">
-                      <h3>Implicit term</h3>
-                      <CopyButton text={stageAnalysis?.implicitTerm ?? ''} />
-                    </Group>
-                    <p className="muted small">
-                      Source declarations are expanded; binders retain name hints and evidence requests appear as ?.
-                    </p>
-                    <pre className="math-block">
-                      {stageAnalysis?.implicitTerm ?? 'Elaborate a valid program to inspect its implicit term.'}
-                    </pre>
-                    <Group justify="space-between" mt="lg">
                       <h3>Core term</h3>
                       <CopyButton text={result?.coreTerm ?? ''} />
                     </Group>
@@ -1033,7 +938,7 @@ export function App({
             </Panel>
           </PanelGroup>
           <footer className="workbench-footer">
-            <span>Source → surface → implicit → core</span>
+            <span>{goals.length > 0 ? `${checkedCount} goals checked · ${totalAttempts} SMT checks` : ''}</span>
             <span>
               Ctrl / ⌘ + Enter to run <span className="toolbar-divider">·</span> Z3 {solverVersion || '…'}
             </span>
@@ -1173,7 +1078,7 @@ function NoQuery({ goal }: { goal?: VisibleGoal }) {
   return (
     <div className="empty-state">
       <Search size={28} />
-      <h3>{goal?.synthesis.ok ? 'Resolved by exact lookup' : 'No SMT query to inspect'}</h3>
+      <h3>{goal?.synthesis.ok ? 'Resolved from the instance context' : 'No SMT query to inspect'}</h3>
       <p>
         {goal?.synthesis.ok
           ? 'A nearest matching instance already has the requested type. Its construction is shown in Evidence.'

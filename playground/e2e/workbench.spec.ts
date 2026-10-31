@@ -11,7 +11,110 @@ async function edit(page: Page, source: string) {
   await page.keyboard.insertText(source);
 }
 
-test('real synthesis supports graph, constraint, model, trace, export, and baseline inspection', async ({ page }) => {
+async function wordColors(page: Page) {
+  return page.locator('.monaco-editor .view-line span[class]').evaluateAll((spans) =>
+    spans.flatMap((span) =>
+      Array.from((span.textContent ?? '').matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)).map(([word]) => ({
+        word,
+        color: getComputedStyle(span).color,
+      })),
+    ),
+  );
+}
+
+test('type positions share one color, distinct from term names and keywords in both themes', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  const source = `trait ToString[A] = {
+  toString: A -> String
+}
+def display[A where ToString[A]](x: A): String = x.toString
+display[Int](1)`;
+  await edit(page, source);
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Toggle color scheme' }).click();
+    await expect
+      .poll(async () => {
+        const words = await wordColors(page);
+        const typeColor = words.find(({ word }) => word === 'Int')?.color;
+        const types = words.filter(({ word }) => ['A', 'ToString', 'String', 'Int'].includes(word));
+        const others = words.filter(({ word }) => ['display', 'x', 'toString', 'def', 'trait', 'where'].includes(word));
+        return (
+          types.length === 10 &&
+          types.every(({ color }) => color === typeColor) &&
+          others.every(({ color }) => color !== typeColor)
+        );
+      })
+      .toBe(true);
+  }
+  await edit(page, 'let A: Int = 1 in A');
+  await expect
+    .poll(async () => {
+      const words = await wordColors(page);
+      const typeColor = words.find(({ word }) => word === 'Int')?.color;
+      return words.filter(({ word }) => word === 'A').every(({ color }) => color !== typeColor);
+    })
+    .toBe(true);
+});
+
+test('named unresolved goals select the matching synthesis request and lexical context', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await edit(
+    page,
+    `instance seed: Int = 11
+let first = summon[Int]
+given second: Int = 22
+{ zebra = summon[Int], alpha = first, result = summon[Int] }`,
+  );
+  const first = page.getByRole('button', { name: 'Inspect goal ?first : Int', exact: true });
+  const zebra = page.getByRole('button', { name: 'Inspect goal ?zebra : Int', exact: true });
+  await expect(page.getByRole('region', { name: 'Unresolved term' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.getByTestId('program-value')).toHaveText('{alpha = 11, result = 22, zebra = 22}');
+  await zebra.click();
+  await expect(zebra).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?zebra : Int');
+  await expect(page.locator('.context-count')).toHaveText('2 instances in scope');
+  await first.click();
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  await expect(zebra).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?first : Int');
+  await expect(page.locator('.context-count')).toHaveText('1 instances in scope');
+  await expect(page.locator('.goal-result')).toHaveText('?first ≔ seed');
+  await first.hover();
+  await expect(page.getByRole('tooltip', { name: '?first ≔ seed', exact: true })).toBeVisible();
+  await page.screenshot({ path: '.cache/screenshots/unresolved-goals.png', fullPage: true });
+});
+
+test('goal markers retain successes, explain failures, and distinguish goals not reached', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await edit(
+    page,
+    `instance seed: Int = 11
+let found = summon[Int]
+let missing = summon[String]
+let skipped = summon[Bool]
+found`,
+  );
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.locator('.diagnostic')).toContainText('MissingInstance');
+  const found = page.getByRole('button', { name: 'Inspect goal ?found : Int', exact: true });
+  const missing = page.getByRole('button', { name: 'Inspect goal ?missing : String', exact: true });
+  const skipped = page.getByRole('button', { name: 'Inspect goal ?skipped : Bool', exact: true });
+  await found.click();
+  await expect(page.locator('.goal-result')).toHaveText('?found ≔ seed');
+  await missing.click();
+  await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?missing : String');
+  await missing.hover();
+  await expect(page.getByRole('tooltip', { name: 'No evidence found for String.', exact: true })).toBeVisible();
+  await expect(skipped).toHaveAttribute('aria-disabled', 'true');
+  await skipped.hover();
+  await expect(page.getByRole('tooltip', { name: 'Synthesis has not reached this goal.', exact: true })).toBeVisible();
+});
+
+test('real synthesis supports graph, constraint, model, trace, and export inspection', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('./');
@@ -42,11 +145,8 @@ test('real synthesis supports graph, constraint, model, trace, export, and basel
   await expect(page.locator('.trace-attempt')).toHaveCount(2);
   await page.getByRole('button', { name: 'Play search playback' }).click();
   await expect(page.locator('.trace-selected')).toContainText('Attempt 2');
-  await page.getByRole('button', { name: 'Compare search' }).click();
-  await expect(page.locator('.comparison-strip')).toContainText('Exact: MissingInstance');
-  await expect(page.locator('.comparison-strip')).toContainText('SMT: resolved');
   await page.getByRole('tab', { name: 'Terms', exact: true }).click();
-  await expect(page.locator('.term-inspector')).toContainText('seed');
+  await expect(page.getByRole('region', { name: 'Unresolved term' })).toContainText('seed');
   await page.screenshot({ path: '.cache/screenshots/terms.png', fullPage: true });
   expect(errors).toEqual([]);
 });
@@ -57,7 +157,8 @@ test('editing, sharing, history, diagnostics, and cancellation use the current s
   await edit(page, program.replace('73', '89'));
   await page.keyboard.press('ControlOrMeta+Enter');
   await expect(page.getByTestId('program-value')).toHaveText('{item = 89}');
-  await page.getByRole('button', { name: 'Share program', exact: true }).click();
+  await page.getByRole('button', { name: 'Source actions', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Share program', exact: true }).click();
   const url = await page.getByRole('textbox', { name: 'Program share link' }).inputValue();
   const shared = await context.newPage();
   await shared.goto(url);
@@ -83,13 +184,28 @@ test('editing, sharing, history, diagnostics, and cancellation use the current s
 });
 
 test('the workbench remains usable on narrow screens and in dark mode', async ({ page }) => {
-  await page.setViewportSize({ width: 420, height: 900 });
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeAttached();
+  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  const separator = (await page.getByRole('separator').boundingBox())!;
+  await page.mouse.move(separator.x + separator.width / 2, separator.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(400, separator.y + 100, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator('.editor-title').getByRole('button', { name: 'Run program' })).toBeVisible();
+  await page.setViewportSize({ width: 420, height: 900 });
+  await expect
+    .poll(async () => {
+      const editor = (await page.locator('.source-panel').boundingBox())!;
+      const research = (await page.locator('.research-panel').boundingBox())!;
+      return research.y >= editor.y + editor.height;
+    })
+    .toBe(true);
   await page.getByRole('button', { name: 'Programs', exact: true }).click();
   await page.getByRole('textbox', { name: 'Search examples' }).fill('synthesized totals');
   await page.getByRole('button', { name: /synthesized totals/ }).click();
-  await page.getByRole('button', { name: 'Run program' }).click();
+  const header = page.locator('.editor-title');
+  await expect(header.getByRole('button', { name: 'Search settings', exact: true })).toBeVisible();
+  await header.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{bytes = 6144, requests = 150}');
   await page.getByRole('button', { name: 'Toggle color scheme' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme', 'dark');

@@ -25,6 +25,11 @@ final case class DisplayNames(
 
 /** Mathematical rendering of implicit terms; this is not a serialization or a source formatter. */
 object ImplicitPrinter {
+  enum Part {
+    case Text(value: String)
+    case Goal(location: TermLocation, expectedType: String, nameHint: Option[String])
+  }
+
   def tpe(value: Type, names: DisplayNames = DisplayNames()): String = value match {
     case Type.IntType => "Int"
     case Type.StringType => "String"
@@ -41,38 +46,73 @@ object ImplicitPrinter {
     }
   }
 
-  def term(value: ImplicitTerm, names: DisplayNames = DisplayNames()): String = value match {
-    case ImplicitTerm.Var(index) => names.ordinary.lift(index).getOrElse(s"x[$index]")
-    case ImplicitTerm.Instance(index) => names.instances.lift(index).getOrElse(s"d[$index]")
+  def term(value: ImplicitTerm, names: DisplayNames = DisplayNames()): String = {
+    document(value, names).map {
+      case Part.Text(text) => text
+      case Part.Goal(_, expectedType, _) => s"?$expectedType"
+    }.mkString
+  }
+
+  /** Goal parts retain their occurrence and scoped type for interactive presentations. */
+  def document(value: ImplicitTerm, names: DisplayNames = DisplayNames()): Vector[Part] = {
+    render(value, names, TermLocation(), None)
+  }
+
+  private def text(value: String): Vector[Part] = Vector(Part.Text(value))
+
+  private def render(
+    value: ImplicitTerm, names: DisplayNames, location: TermLocation, hint: Option[String]
+  ): Vector[Part] = value match {
+    case ImplicitTerm.Var(index) => text(names.ordinary.lift(index).getOrElse(s"x[$index]"))
+    case ImplicitTerm.Instance(index) => text(names.instances.lift(index).getOrElse(s"d[$index]"))
     case ImplicitTerm.Lam(annotation, body, hint) => {
       val nested = names.bindOrdinary(hint)
-      s"λ(${nested.ordinary.head}: ${tpe(annotation, names)}). ${term(body, nested)}"
+      text(s"λ(${nested.ordinary.head}: ${tpe(annotation, names)}). ") ++
+      render(body, nested, location / TermChild.Body, None)
     }
     case ImplicitTerm.ImplicitLam(annotation, body, hint) => {
       val nested = names.bindInstance(hint)
-      s"λ{${nested.instances.head}: ${tpe(annotation, names)}}. ${term(body, nested)}"
+      text(s"λ{${nested.instances.head}: ${tpe(annotation, names)}}. ") ++
+      render(body, nested, location / TermChild.Body, None)
     }
     case ImplicitTerm.TypeLam(body, hint) => {
       val nested = names.bindType(hint)
-      s"Λ${nested.types.head}. ${term(body, nested)}"
+      text(s"Λ${nested.types.head}. ") ++ render(body, nested, location / TermChild.Body, None)
     }
-    case ImplicitTerm.App(function, argument) => s"(${term(function, names)}) (${term(argument, names)})"
-    case ImplicitTerm.ImplicitApp(function, argument) => s"(${term(function, names)}){${term(argument, names)}}"
-    case ImplicitTerm.TypeApp(function, argument) => s"(${term(function, names)})[${tpe(argument, names)}]"
+    case ImplicitTerm.App(function, argument) => {
+      text("(") ++ render(function, names, location / TermChild.Function, None) ++ text(") (") ++
+      render(argument, names, location / TermChild.Argument, None) ++ text(")")
+    }
+    case ImplicitTerm.ImplicitApp(function, argument) => {
+      val parameterHint = function match {
+        case ImplicitTerm.ImplicitLam(_, _, hint) => hint
+        case _ => None
+      }
+      text("(") ++ render(function, names, location / TermChild.Function, None) ++ text("){") ++
+      render(argument, names, location / TermChild.Argument, parameterHint) ++ text("}")
+    }
+    case ImplicitTerm.TypeApp(function, argument) => {
+      text("(") ++ render(function, names, location / TermChild.Function, None) ++ text(s")[${tpe(argument, names)}]")
+    }
     case ImplicitTerm.Let(annotation, value, body, hint) => {
       val nested = names.bindOrdinary(hint)
-      s"let ${nested.ordinary.head}: ${tpe(annotation, names)} = ${term(value, names)} in\n${term(body, nested)}"
+      text(s"let ${nested.ordinary.head}: ${tpe(annotation, names)} = ") ++
+      render(value, names, location / TermChild.Value, hint.map(_ => nested.ordinary.head)) ++ text(" in\n") ++
+      render(body, nested, location / TermChild.Body, None)
     }
     case ImplicitTerm.Impl(annotation, value, body, hint) => {
       val nested = names.bindInstance(hint)
-      s"impl ${nested.instances.head}: ${tpe(annotation, names)} = ${term(value, names)} in\n${term(body, nested)}"
+      text(s"impl ${nested.instances.head}: ${tpe(annotation, names)} = ") ++
+      render(value, names, location / TermChild.Value, hint.map(_ => nested.instances.head)) ++ text(" in\n") ++
+      render(body, nested, location / TermChild.Body, None)
     }
     case ImplicitTerm.Fix(annotation, body, hint) => {
       val nested = names.bindOrdinary(hint)
-      s"fix ${nested.ordinary.head}: ${tpe(annotation, names)}. ${term(body, nested)}"
+      text(s"fix ${nested.ordinary.head}: ${tpe(annotation, names)}. ") ++
+      render(body, nested, location / TermChild.Body, None)
     }
-    case ImplicitTerm.Need(goal) => s"?${tpe(goal, names)}"
-    case ImplicitTerm.IntLit(value) => value.toString
+    case ImplicitTerm.Need(goal, nameHint) => Vector(Part.Goal(location, tpe(goal, names), hint.orElse(nameHint)))
+    case ImplicitTerm.IntLit(value) => text(value.toString)
     case ImplicitTerm.StringLit(value) => {
       val escaped = value.flatMap {
         case '\\' => "\\\\"
@@ -82,13 +122,23 @@ object ImplicitPrinter {
         case '\t' => "\\t"
         case character => character.toString
       }
-      s"\"$escaped\""
+      text(s"\"$escaped\"")
     }
-    case ImplicitTerm.BoolLit(value) => value.toString
+    case ImplicitTerm.BoolLit(value) => text(value.toString)
     case ImplicitTerm.Record(fields) => {
-      fields.toVector.sortBy(_._1).map((label, value) => s"$label = ${term(value, names)}").mkString("{", ", ", "}")
+      val parts = fields.toVector.sortBy(_._1).map { (label, value) =>
+        text(s"$label = ") ++ render(value, names, location / TermChild.Field(label), Some(label))
+      }
+      text("{") ++ parts.zipWithIndex.flatMap { (part, index) =>
+        (if index == 0 then Vector.empty else text(", ")) ++ part
+      } ++ text("}")
     }
-    case ImplicitTerm.Proj(record, label) => s"(${term(record, names)}).$label"
-    case ImplicitTerm.BinOp(kind, left, right) => s"(${term(left, names)} $kind ${term(right, names)})"
+    case ImplicitTerm.Proj(record, label) => {
+      text("(") ++ render(record, names, location / TermChild.Receiver, None) ++ text(s").$label")
+    }
+    case ImplicitTerm.BinOp(kind, left, right) => {
+      text("(") ++ render(left, names, location / TermChild.Left, None) ++ text(s" $kind ") ++
+      render(right, names, location / TermChild.Right, None) ++ text(")")
+    }
   }
 }

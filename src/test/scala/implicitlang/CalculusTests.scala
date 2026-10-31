@@ -654,7 +654,9 @@ object CalculusTests {
 
     test("name elaboration inserts a hole without attempting synthesis") {
       val parsed = success(new Parser().parse("summon[Int]"))
-      assert(success(new Elaborator().elaborate(parsed)) == Elaborated(ImplicitTerm.Need(Type.IntType), Type.IntType))
+      assert(success(new Elaborator().elaborate(parsed)) == Elaborated(
+        ImplicitTerm.Need(Type.IntType, Some("Int")), Type.IntType
+      ))
       expectFailure(Pipeline.compile("summon[Int]")) { case Error.MissingInstance(_) => true; case _ => false }
     }
 
@@ -1340,12 +1342,14 @@ object CalculusTests {
       val method = success(new Elaborator().elaborate(parse("(implicit methods: { inc: Int -> Int }) => 21.inc")))
       assert(method.expression == ImplicitTerm.ImplicitLam(
         methodType,
-        ImplicitTerm.App(ImplicitTerm.Proj(ImplicitTerm.Need(methodType), "inc"), ImplicitTerm.IntLit(21)),
+        ImplicitTerm.App(
+          ImplicitTerm.Proj(ImplicitTerm.Need(methodType, Some("methods")), "inc"), ImplicitTerm.IntLit(21)
+        ),
         Some("methods")
       ))
       val qualified = "type C = { inc: Int -> Int } in C::inc"
       val selected = success(new Elaborator().elaborate(parse(qualified)))
-      assert(selected.expression == ImplicitTerm.Proj(ImplicitTerm.Need(methodType), "inc"))
+      assert(selected.expression == ImplicitTerm.Proj(ImplicitTerm.Need(methodType, Some("C")), "inc"))
       expectFailure(Pipeline.compile(qualified)) {
         case Error.MissingInstance(actual) => actual == methodType
         case _ => false

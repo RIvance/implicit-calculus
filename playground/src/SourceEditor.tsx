@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react';
 import Editor, { loader, type OnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor/editor/editor.api.js';
+import 'monaco-editor/editor/contrib/semanticTokens/browser/documentSemanticTokens.js';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
-import type { Analysis } from '../bridge/protocol';
+import type { Analysis, Language } from '../bridge/protocol';
+import { typeIdentifiers } from './highlighting';
 
 globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });
@@ -21,7 +23,7 @@ const keywordHelp: Record<string, string> = {
   let: 'Bind an ordinary value. A newline may separate the binding from its body.',
 };
 
-function registerLanguage(keywords: string[]) {
+function registerLanguage(language: Language) {
   if (!monaco.languages.getLanguages().some((language) => language.id === languageId)) {
     monaco.languages.register({ id: languageId, extensions: ['.imp'] });
     monaco.languages.setLanguageConfiguration(languageId, {
@@ -46,16 +48,38 @@ function registerLanguage(keywords: string[]) {
       wordPattern: /[\p{L}_$][\p{L}\p{N}_$]*/u,
     });
   }
-  return monaco.languages.setMonarchTokensProvider(languageId, {
+  monaco.editor.defineTheme('implicit-light', {
+    base: 'vs',
+    inherit: true,
+    colors: {},
+    rules: [{ token: 'type', foreground: '267F99' }],
+  });
+  monaco.editor.defineTheme('implicit-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    colors: {},
+    rules: [{ token: 'type', foreground: '4EC9B0' }],
+  });
+  const tokenizer = monaco.languages.setMonarchTokensProvider(languageId, {
     unicode: true,
-    keywords,
+    ...language,
     tokenizer: {
       root: [
         [/\/\*/, 'comment', '@comment'],
         [/\/\/.*$/, 'comment'],
         [/"/, 'string', '@string'],
         [/\d+/, 'number'],
-        [/[\p{L}_$][\p{L}\p{N}_$]*/u, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
+        [
+          /[\p{L}_$][\p{L}\p{N}_$]*/u,
+          {
+            cases: {
+              '@primitiveTypes': 'type',
+              '@literals': 'constant',
+              '@keywords': 'keyword',
+              '@default': 'identifier',
+            },
+          },
+        ],
         [/[{}()[\]]/, '@brackets'],
         [/::|~>|=>|->|\+\+|==|[+*=<>-]/, 'operator'],
         [/[,:;.]/, 'delimiter'],
@@ -72,13 +96,37 @@ function registerLanguage(keywords: string[]) {
       ],
     },
   });
+  const types = monaco.languages.registerDocumentSemanticTokensProvider(languageId, {
+    getLegend: () => ({ tokenTypes: ['type'], tokenModifiers: [] }),
+    provideDocumentSemanticTokens: (model) => {
+      let line = 0;
+      let column = 0;
+      const data = typeIdentifiers(model.getValue(), language).flatMap((span) => {
+        const position = model.getPositionAt(span.offset);
+        const nextLine = position.lineNumber - 1;
+        const nextColumn = position.column - 1;
+        const token = [nextLine - line, nextColumn - (line === nextLine ? column : 0), span.length, 0, 0];
+        line = nextLine;
+        column = nextColumn;
+        return token;
+      });
+      return { data: new Uint32Array(data) };
+    },
+    releaseDocumentSemanticTokens: () => {},
+  });
+  return {
+    dispose: () => {
+      tokenizer.dispose();
+      types.dispose();
+    },
+  };
 }
 
 export function SourceEditor({
   source,
   onChange,
   analysis,
-  keywords,
+  language,
   dark,
   wrap,
   fontSize,
@@ -88,7 +136,7 @@ export function SourceEditor({
   source: string;
   onChange: (source: string) => void;
   analysis: Analysis | null;
-  keywords: string[];
+  language: Language;
   dark: boolean;
   wrap: boolean;
   fontSize: number;
@@ -96,8 +144,8 @@ export function SourceEditor({
   onReady: (editor: monaco.editor.IStandaloneCodeEditor) => void;
 }) {
   const instance = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
-  const latest = useRef({ analysis, onRun, keywords });
-  latest.current = { analysis, onRun, keywords };
+  const latest = useRef({ analysis, onRun, language });
+  latest.current = { analysis, onRun, language };
   function showDiagnostics() {
     const model = instance.current?.getModel();
     if (!model) return;
@@ -130,12 +178,24 @@ export function SourceEditor({
         const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
         return {
           suggestions: [
-            ...latest.current.keywords.map((name) => ({
+            ...latest.current.language.keywords.map((name) => ({
               label: name,
               insertText: name,
               kind: monaco.languages.CompletionItemKind.Keyword,
               range,
               documentation: keywordHelp[name],
+            })),
+            ...latest.current.language.primitiveTypes.map((name) => ({
+              label: name,
+              insertText: name,
+              kind: monaco.languages.CompletionItemKind.Class,
+              range,
+            })),
+            ...latest.current.language.literals.map((name) => ({
+              label: name,
+              insertText: name,
+              kind: monaco.languages.CompletionItemKind.Value,
+              range,
             })),
             ...(latest.current.analysis?.symbols ?? []).map((symbol) => ({
               label: symbol.name,
@@ -171,14 +231,14 @@ export function SourceEditor({
   };
   useEffect(showDiagnostics, [analysis]);
   useEffect(() => {
-    const tokenizer = registerLanguage(keywords);
+    const tokenizer = registerLanguage(language);
     return () => tokenizer.dispose();
-  }, [keywords]);
+  }, [language]);
   return (
     <Editor
       height="100%"
       language={languageId}
-      theme={dark ? 'vs-dark' : 'vs'}
+      theme={dark ? 'implicit-dark' : 'implicit-light'}
       value={source}
       onChange={(value) => onChange(value ?? '')}
       onMount={mount}
@@ -198,6 +258,7 @@ export function SourceEditor({
         smoothScrolling: true,
         cursorSmoothCaretAnimation: 'on',
         folding: true,
+        'semanticHighlighting.enabled': true,
       }}
     />
   );

@@ -2,7 +2,7 @@ import { proxy, releaseProxy, wrap, type Remote } from 'comlink';
 import workerModule from './compiler.worker?worker&url';
 import solverPackage from 'z3-solver/package.json';
 import type { WorkerApi } from './compiler.worker';
-import type { Progress, RunOptions } from '../bridge/protocol';
+import type { Language, Progress, RunOptions } from '../bridge/protocol';
 
 export class Interrupted extends Error {
   constructor(
@@ -18,7 +18,7 @@ export class CompilerClient {
   private readonly worker: Worker;
   private readonly remote: Remote<WorkerApi>;
   private readonly lifetime = new AbortController();
-  readonly language: Promise<{ keywords: string[] }>;
+  readonly language: Promise<Language>;
   readonly ready: Promise<{ version: string }>;
 
   constructor() {

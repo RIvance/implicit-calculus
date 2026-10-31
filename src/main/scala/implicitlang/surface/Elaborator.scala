@@ -7,6 +7,30 @@ import implicitlang.util.Result
 
 /** Name resolution, alias expansion, checking, and goal insertion. No instance search occurs here. */
 final class Elaborator {
+  /** Source names follow applications during elaboration and are retained only on the resulting binders and goals. */
+  private enum NameHints {
+    case Unknown
+    case Parameter(name: Option[String], body: NameHints)
+    case Fields(values: Map[String, NameHints])
+
+    def parameter: Option[String] = this match {
+      case Parameter(name, _) => name
+      case _ => None
+    }
+
+    def result: NameHints = this match {
+      case Parameter(_, body) => body
+      case _ => Unknown
+    }
+
+    def field(label: String): NameHints = this match {
+      case Fields(values) => values.getOrElse(label, Unknown)
+      case _ => Unknown
+    }
+  }
+
+  private final case class NamedTerm(expression: ImplicitTerm, tpe: Type, hints: NameHints = NameHints.Unknown)
+
   private enum Space {
     case Ordinary, Instance
   }
@@ -18,7 +42,9 @@ final class Elaborator {
     }
   }
 
-  private final case class Binding(name: String, tpe: Type, space: Space)
+  private final case class Binding(
+    name: String, tpe: Type, space: Space, hints: NameHints, nameHint: Option[String]
+  )
 
   private enum DeclarationKind {
     case Alias, Trait
@@ -41,15 +67,18 @@ final class Elaborator {
     bindings: List[Binding] = Nil,
     declarations: Map[String, TypeDeclaration] = Map.empty
   ) {
-    def bind(name: String, tpe: Type, space: Space): Scope = {
-      copy(bindings = Binding(name, tpe, space) :: bindings)
+    def bind(
+      name: String, tpe: Type, space: Space, hints: NameHints = NameHints.Unknown, nameHint: Option[String] = None
+    ): Scope = {
+      val displayName = nameHint.orElse(Option.when(!name.startsWith("@"))(name))
+      copy(bindings = Binding(name, tpe, space, hints, displayName) :: bindings)
     }
 
     def bindType(name: String): Scope = {
       copy(typeNames = name :: typeNames, bindings = bindings.map(binding => binding.copy(tpe = binding.tpe.shift(1))))
     }
 
-    def lookup(name: String): Result[Elaborated, Error] = {
+    def lookup(name: String): Result[NamedTerm, Error] = {
       val position = bindings.indexWhere(_.name == name)
       if position < 0 then {
         Result.Err(Error.UnknownTerm(name))
@@ -60,7 +89,7 @@ final class Elaborator {
           case Space.Ordinary => ImplicitTerm.Var(index)
           case Space.Instance => ImplicitTerm.Instance(index)
         }
-        Result.Ok(Elaborated(expression, binding.tpe))
+        Result.Ok(NamedTerm(expression, binding.tpe, binding.hints))
       }
     }
   }
@@ -68,6 +97,7 @@ final class Elaborator {
   def elaborate(program: Program, expected: Option[Type] = None): Result[Elaborated, Error] = {
     val valid = expected.fold[Result[Unit, Error]](Result.Ok(()))(_.validate(0))
     valid.flatMap(_ => elaborateDeclarations(program.declarations.toList, program.expression, Scope(), expected))
+      .map(value => Elaborated(value.expression, value.tpe))
   }
 
   private def resolveType(expression: SurfaceType, scope: Scope): Result[Type, Error] = expression match {
@@ -133,21 +163,36 @@ final class Elaborator {
     case _ => resolveType(annotation, scope)
   }
 
-  private final case class ResolvedTypeParameters(parameters: Vector[String], constraints: Vector[Type]) {
+  private final case class ResolvedConstraint(name: String, tpe: Type)
+
+  private final case class ResolvedTypeParameters(parameters: Vector[String], constraints: Vector[ResolvedConstraint]) {
     def enter(scope: Scope): Scope = {
       val parameterScope = parameters.foldLeft(scope)((current, name) => current.bindType(name))
-      constraints.foldLeft(parameterScope)((current, tpe) => current.bind("@constraint", tpe, Space.Instance))
+      constraints.foldLeft(parameterScope) { (current, constraint) =>
+        current.bind("@constraint", constraint.tpe, Space.Instance, nameHint = Some(constraint.name))
+      }
     }
 
     def qualify(tpe: Type): Type = {
-      parameters.foldRight(constraints.foldRight(tpe)(Type.Implicit.apply))((_, body) => Type.Forall(body))
+      parameters.foldRight(constraints.foldRight(tpe)((constraint, body) => Type.Implicit(constraint.tpe, body))) {
+        (_, body) => Type.Forall(body)
+      }
+    }
+
+    def nameHints(body: NameHints): NameHints = {
+      val constrained = constraints.foldRight(body) { (constraint, result) =>
+        NameHints.Parameter(Some(constraint.name), result)
+      }
+      parameters.foldRight(constrained)((_, result) => NameHints.Parameter(None, result))
     }
 
     /** Λᾱ.λ{d₁:D₁}.…λ{dₙ:Dₙ}.c : ∀ᾱ.D₁ ⇒ … ⇒ Dₙ ⇒ A. */
-    def abstractValue(value: Elaborated): Elaborated = {
-      val constrained = constraints.foldRight(value.expression)((tpe, body) => ImplicitTerm.ImplicitLam(tpe, body))
+    def abstractValue(value: NamedTerm): NamedTerm = {
+      val constrained = constraints.foldRight(value.expression) { (constraint, body) =>
+        ImplicitTerm.ImplicitLam(constraint.tpe, body, Some(constraint.name))
+      }
       val expression = parameters.foldRight(constrained)((name, body) => ImplicitTerm.TypeLam(body, Some(name)))
-      Elaborated(expression, qualify(value.tpe))
+      NamedTerm(expression, qualify(value.tpe), nameHints(value.hints))
     }
   }
 
@@ -162,12 +207,12 @@ final class Elaborator {
       case ParameterKind.Implicit => Type.Implicit(tpe, result)
     }
 
-    def abstractValue(value: Elaborated): Elaborated = {
+    def abstractValue(value: NamedTerm): NamedTerm = {
       val expression = kind match {
         case ParameterKind.Ordinary => ImplicitTerm.Lam(tpe, value.expression, Some(name))
         case ParameterKind.Implicit => ImplicitTerm.ImplicitLam(tpe, value.expression, Some(name))
       }
-      Elaborated(expression, functionType(value.tpe))
+      NamedTerm(expression, functionType(value.tpe), NameHints.Parameter(Some(name), value.hints))
     }
   }
 
@@ -177,7 +222,9 @@ final class Elaborator {
     for {
       _ <- checkDistinctNames(typeParameters.names)
       parameterScope = typeParameters.names.foldLeft(scope)((current, name) => current.bindType(name))
-      constraints <- Result.traverse(typeParameters.constraints)(resolveTrait(_, parameterScope))
+      constraints <- Result.traverse(typeParameters.constraints) { reference =>
+        resolveTrait(reference, parameterScope).map(ResolvedConstraint(reference.name, _))
+      }
     } yield ResolvedTypeParameters(typeParameters.names, constraints)
   }
 
@@ -198,7 +245,7 @@ final class Elaborator {
 
   private def elaborateEvidence(
     typeParameters: TypeParameters, value: SurfaceExpr, scope: Scope
-  )(annotation: Scope => Result[Type, Error]): Result[Elaborated, Error] = {
+  )(annotation: Scope => Result[Type, Error]): Result[NamedTerm, Error] = {
     for {
       resolved <- resolveTypeParameters(typeParameters, scope)
       current = resolved.enter(scope)
@@ -213,7 +260,7 @@ final class Elaborator {
     case _ => false
   }
 
-  private def elaborateDefinition(definition: Declaration.Def, scope: Scope): Result[Elaborated, Error] = {
+  private def elaborateDefinition(definition: Declaration.Def, scope: Scope): Result[NamedTerm, Error] = {
     val Declaration.Def(name, typeParameters, parameters, resultType, body) = definition
     val recursive = !parameters.exists(_.name == name) && body.refersTo(name)
     for {
@@ -226,29 +273,36 @@ final class Elaborator {
       signature = resolved.qualify(arguments.foldRight(result)((parameter, tpe) => parameter.functionType(tpe)))
       _ <- if !recursive || permitsRecursion(signature) then Result.Ok(())
         else Result.Err(Error.RecursiveDefinitionType(name, signature))
-      recursiveScope = if recursive then scope.bind(name, signature, Space.Ordinary) else scope
+      argumentHints = arguments.foldRight[NameHints](NameHints.Unknown) { (parameter, body) =>
+        NameHints.Parameter(Some(parameter.name), body)
+      }
+      recursiveScope = if recursive then scope.bind(name, signature, Space.Ordinary, resolved.nameHints(argumentHints))
+        else scope
       bodyScope = arguments.foldLeft(resolved.enter(recursiveScope))((current, parameter) => parameter.enter(current))
       checked <- elaborate(body, bodyScope, Some(result))
       parameterized = arguments.foldRight(checked)((parameter, value) => parameter.abstractValue(value))
       abstracted = resolved.abstractValue(parameterized)
-      value = if recursive then ImplicitTerm.Fix(signature, abstracted.expression, Some(name)) else abstracted.expression
-    } yield Elaborated(value, signature)
+      value = if recursive then ImplicitTerm.Fix(signature, abstracted.expression, Some(name))
+        else abstracted.expression
+    } yield NamedTerm(value, signature, abstracted.hints)
   }
 
   /** Declarations extend the lexical scope in order, then wrap the final expression in term bindings. */
   private def elaborateDeclarations(
     declarations: List[Declaration], body: SurfaceExpr, scope: Scope, expected: Option[Type]
-  ): Result[Elaborated, Error] = {
-    def bind(name: String, value: Elaborated, space: Space, rest: List[Declaration]): Result[Elaborated, Error] = {
-      elaborateDeclarations(rest, body, scope.bind(name, value.tpe, space), expected).map { result =>
+  ): Result[NamedTerm, Error] = {
+    def bind(
+      name: String, value: NamedTerm, space: Space, rest: List[Declaration], nameHint: Option[String] = None
+    ): Result[NamedTerm, Error] = {
+      val hint = nameHint.orElse(Option.when(!name.startsWith("@"))(name))
+      elaborateDeclarations(rest, body, scope.bind(name, value.tpe, space, value.hints, hint), expected).map { result =>
         val expression = space match {
           case Space.Ordinary => ImplicitTerm.Let(value.tpe, value.expression, result.expression, Some(name))
           case Space.Instance => {
-            val hint = Option.when(!name.startsWith("@"))(name)
             ImplicitTerm.Impl(value.tpe, value.expression, result.expression, hint)
           }
         }
-        Elaborated(expression, result.tpe)
+        NamedTerm(expression, result.tpe, result.hints)
       }
     }
     declarations match {
@@ -266,7 +320,7 @@ final class Elaborator {
       }
       case Declaration.Implement(typeParameters, target, value) :: rest => {
         elaborateEvidence(typeParameters, value, scope)(resolveTrait(target, _))
-          .flatMap(bind("@implementation", _, Space.Instance, rest))
+          .flatMap(bind("@implementation", _, Space.Instance, rest, Some(target.name)))
       }
       case Declaration.Instance(name, typeParameters, annotation, value) :: rest => {
         elaborateEvidence(typeParameters, value, scope)(resolveType(annotation, _))
@@ -275,18 +329,39 @@ final class Elaborator {
     }
   }
 
-  private def exposeExplicitArrow(value: Elaborated): Elaborated = value.tpe match {
+  private def exposeExplicitArrow(value: NamedTerm): NamedTerm = value.tpe match {
     case Type.Implicit(parameter, result) => {
-      exposeExplicitArrow(Elaborated(ImplicitTerm.ImplicitApp(value.expression, ImplicitTerm.Need(parameter)), result))
+      val hint = value.hints.parameter.orElse(Some(goalName(parameter)))
+      exposeExplicitArrow(NamedTerm(
+        ImplicitTerm.ImplicitApp(value.expression, ImplicitTerm.Need(parameter, hint)), result, value.hints.result
+      ))
     }
     case _ => value
+  }
+
+  private def goalName(tpe: Type): String = tpe match {
+    case Type.IntType => "Int"
+    case Type.StringType => "String"
+    case Type.BoolType => "Bool"
+    case Type.Variable(_) => "value"
+    case Type.Record(_) => "record"
+    case Type.Arrow(_, _) | Type.Implicit(_, _) => "function"
+    case Type.Forall(body) => goalName(body)
+  }
+
+  private def request(annotation: SurfaceType, tpe: Type): ImplicitTerm = {
+    val name = annotation match {
+      case SurfaceType.Named(name, _) => name
+      case _ => goalName(tpe)
+    }
+    ImplicitTerm.Need(tpe, Some(name))
   }
 
   /** None synthesizes a type; Some checks the term against an established expected type. */
   private def elaborate(
     expression: SurfaceExpr, scope: Scope, expected: Option[Type]
-  ): Result[Elaborated, Error] = {
-    val elaborated: Result[Elaborated, Error] = expression match {
+  ): Result[NamedTerm, Error] = {
+    val elaborated: Result[NamedTerm, Error] = expression match {
       case SurfaceExpr.Var(name) => scope.lookup(name)
       /*
        * Γ,x:A; Δ ⊢ e ⇐ B ⇝ c
@@ -318,7 +393,10 @@ final class Elaborator {
             case _ => Result.Ok(())
           }
           result <- elaborate(body, scope.bind(name, parameter, Space.Ordinary), context.map(_.result))
-        } yield Elaborated(ImplicitTerm.Lam(parameter, result.expression, Some(name)), Type.Arrow(parameter, result.tpe))
+        } yield NamedTerm(
+          ImplicitTerm.Lam(parameter, result.expression, Some(name)), Type.Arrow(parameter, result.tpe),
+          NameHints.Parameter(Some(name), result.hints)
+        )
       }
       /*
        * Γ; Δ, d:A ⊢ e:B ⇝ c
@@ -335,8 +413,9 @@ final class Elaborator {
             case None => Result.Ok(None)
           }
           result <- elaborate(body, scope.bind(name, parameter, Space.Instance), resultType)
-        } yield Elaborated(
-          ImplicitTerm.ImplicitLam(parameter, result.expression, Some(name)), Type.Implicit(parameter, result.tpe)
+        } yield NamedTerm(
+          ImplicitTerm.ImplicitLam(parameter, result.expression, Some(name)), Type.Implicit(parameter, result.tpe),
+          NameHints.Parameter(Some(name), result.hints)
         )
       }
       case SurfaceExpr.App(function, argument) => {
@@ -344,7 +423,7 @@ final class Elaborator {
           prepared.tpe match {
             case Type.Arrow(parameter, result) => {
               elaborate(argument, scope, Some(parameter)).map { actual =>
-                Elaborated(ImplicitTerm.App(prepared.expression, actual.expression), result)
+                NamedTerm(ImplicitTerm.App(prepared.expression, actual.expression), result, prepared.hints.result)
               }
             }
             case other => Result.Err(Error.ExpectedFunction(other))
@@ -356,7 +435,9 @@ final class Elaborator {
           prepared.tpe match {
             case Type.Implicit(parameter, result) => {
               elaborate(argument, scope, Some(parameter)).map { actual =>
-                Elaborated(ImplicitTerm.ImplicitApp(prepared.expression, actual.expression), result)
+                NamedTerm(
+                  ImplicitTerm.ImplicitApp(prepared.expression, actual.expression), result, prepared.hints.result
+                )
               }
             }
             case other => Result.Err(Error.ExpectedImplicitFunction(other))
@@ -371,7 +452,10 @@ final class Elaborator {
             case None => Result.Ok(None)
           }
           result <- elaborate(body, scope.bindType(parameter), bodyType)
-        } yield Elaborated(ImplicitTerm.TypeLam(result.expression, Some(parameter)), Type.Forall(result.tpe))
+        } yield NamedTerm(
+          ImplicitTerm.TypeLam(result.expression, Some(parameter)), Type.Forall(result.tpe),
+          NameHints.Parameter(None, result.hints)
+        )
       }
       case SurfaceExpr.TypeApp(function, argument) => {
         for {
@@ -379,7 +463,9 @@ final class Elaborator {
           actual <- resolveType(argument, scope)
           result <- prepared.tpe match {
             case Type.Forall(body) => {
-              Result.Ok(Elaborated(ImplicitTerm.TypeApp(prepared.expression, actual), body.instantiate(actual)))
+              Result.Ok(NamedTerm(
+                ImplicitTerm.TypeApp(prepared.expression, actual), body.instantiate(actual), prepared.hints.result
+              ))
             }
             case other => Result.Err(Error.ExpectedPolymorphic(other))
           }
@@ -393,8 +479,10 @@ final class Elaborator {
       case SurfaceExpr.Let(name, value, body) => {
         for {
           checked <- elaborate(value, scope, None)
-          result <- elaborate(body, scope.bind(name, checked.tpe, Space.Ordinary), expected)
-        } yield Elaborated(ImplicitTerm.Let(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe)
+          result <- elaborate(body, scope.bind(name, checked.tpe, Space.Ordinary, checked.hints), expected)
+        } yield NamedTerm(
+          ImplicitTerm.Let(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe, result.hints
+        )
       }
       /*
        * Γ; Δ ⊢ e₁:A ⇝ c₁    Γ; Δ,d:A ⊢ e₂:B ⇝ c₂
@@ -405,11 +493,13 @@ final class Elaborator {
         for {
           declared <- resolveType(annotation, scope)
           checked <- elaborate(value, scope, Some(declared))
-          result <- elaborate(body, scope.bind(name, checked.tpe, Space.Instance), expected)
-        } yield Elaborated(ImplicitTerm.Impl(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe)
+          result <- elaborate(body, scope.bind(name, checked.tpe, Space.Instance, checked.hints), expected)
+        } yield NamedTerm(
+          ImplicitTerm.Impl(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe, result.hints
+        )
       }
       case SurfaceExpr.Need(annotation) => {
-        resolveType(annotation, scope).map(tpe => Elaborated(ImplicitTerm.Need(tpe), tpe))
+        resolveType(annotation, scope).map(tpe => NamedTerm(request(annotation, tpe), tpe))
       }
       case SurfaceExpr.Ascribe(value, annotation) => {
         for {
@@ -417,12 +507,12 @@ final class Elaborator {
           checked <- elaborate(value, scope, Some(declared))
         } yield checked
       }
-      case SurfaceExpr.IntLit(value) => Result.Ok(Elaborated(ImplicitTerm.IntLit(value), Type.IntType))
-      case SurfaceExpr.StringLit(value) => Result.Ok(Elaborated(ImplicitTerm.StringLit(value), Type.StringType))
-      case SurfaceExpr.BoolLit(value) => Result.Ok(Elaborated(ImplicitTerm.BoolLit(value), Type.BoolType))
+      case SurfaceExpr.IntLit(value) => Result.Ok(NamedTerm(ImplicitTerm.IntLit(value), Type.IntType))
+      case SurfaceExpr.StringLit(value) => Result.Ok(NamedTerm(ImplicitTerm.StringLit(value), Type.StringType))
+      case SurfaceExpr.BoolLit(value) => Result.Ok(NamedTerm(ImplicitTerm.BoolLit(value), Type.BoolType))
       case SurfaceExpr.Record(fields) => {
         val fieldTypes = expected.collect { case Type.Record(types) => types }
-        val checkedFields = fields.foldLeft[Result[Map[String, Elaborated], Error]](Result.Ok(Map.empty)) {
+        val checkedFields = fields.foldLeft[Result[Map[String, NamedTerm], Error]](Result.Ok(Map.empty)) {
           case (accumulated, (label, value)) => {
             for {
               checked <- accumulated
@@ -431,9 +521,10 @@ final class Elaborator {
           }
         }
         checkedFields.map { checked =>
-          Elaborated(
+          NamedTerm(
             ImplicitTerm.Record(checked.map { case (label, value) => label -> value.expression }),
-            Type.Record(checked.map { case (label, value) => label -> value.tpe })
+            Type.Record(checked.map { case (label, value) => label -> value.tpe }),
+            NameHints.Fields(checked.map { case (label, value) => label -> value.hints })
           )
         }
       }
@@ -451,14 +542,14 @@ final class Elaborator {
       }
       case SurfaceExpr.QualifiedSelect(annotation, label) => {
         resolveSelectionType(annotation, scope).flatMap { tpe =>
-          select(Elaborated(ImplicitTerm.Need(tpe), tpe), label, scope)
+          select(NamedTerm(request(annotation, tpe), tpe), label, scope)
         }
       }
       case SurfaceExpr.BinOp(kind, left, right) => {
         for {
           first <- elaborate(left, scope, Some(kind.operandType))
           second <- elaborate(right, scope, Some(kind.operandType))
-        } yield Elaborated(ImplicitTerm.BinOp(kind, first.expression, second.expression), kind.resultType)
+        } yield NamedTerm(ImplicitTerm.BinOp(kind, first.expression, second.expression), kind.resultType)
       }
     }
     elaborated.flatMap { actual =>
@@ -469,21 +560,23 @@ final class Elaborator {
     }
   }
 
-  private def select(receiver: Elaborated, label: String, scope: Scope): Result[Elaborated, Error] = {
+  private def select(receiver: NamedTerm, label: String, scope: Scope): Result[NamedTerm, Error] = {
     val field = receiver.tpe match {
       case Type.Record(fields) => fields.get(label)
       case _ => None
     }
     field match {
-      case Some(tpe) => Result.Ok(Elaborated(ImplicitTerm.Proj(receiver.expression, label), tpe))
+      case Some(tpe) => {
+        Result.Ok(NamedTerm(ImplicitTerm.Proj(receiver.expression, label), tpe, receiver.hints.field(label)))
+      }
       case None => elaborateMethod(receiver, label, scope)
     }
   }
 
   /** Infer a method's evidence TYPE from Δ; defer the actual evidence choice to the synthesizer. */
-  private def elaborateMethod(receiver: Elaborated, label: String, scope: Scope): Result[Elaborated, Error] = {
+  private def elaborateMethod(receiver: NamedTerm, label: String, scope: Scope): Result[NamedTerm, Error] = {
     val candidates = scope.bindings.collect {
-      case Binding(_, recordType @ Type.Record(fields), Space.Instance) => {
+      case Binding(_, recordType @ Type.Record(fields), Space.Instance, _, _) => {
         fields.get(label).collect {
           case Type.Arrow(parameter, result) if parameter == receiver.tpe => recordType -> result
         }
@@ -491,8 +584,11 @@ final class Elaborator {
     }.flatten.distinct
     candidates match {
       case (recordType, result) :: Nil => {
-        val method = ImplicitTerm.Proj(ImplicitTerm.Need(recordType), label)
-        Result.Ok(Elaborated(ImplicitTerm.App(method, receiver.expression), result))
+        val binding = scope.bindings.find(value => value.space == Space.Instance && value.tpe == recordType)
+        val hint = binding.flatMap(_.nameHint).orElse(Some(label))
+        val hints = binding.map(_.hints.field(label).result).getOrElse(NameHints.Unknown)
+        val method = ImplicitTerm.Proj(ImplicitTerm.Need(recordType, hint), label)
+        Result.Ok(NamedTerm(ImplicitTerm.App(method, receiver.expression), result, hints))
       }
       case Nil => Result.Err(Error.MissingMethod(label, receiver.tpe))
       case _ => Result.Err(Error.AmbiguousMethod(label, candidates.map(_._1).toVector))

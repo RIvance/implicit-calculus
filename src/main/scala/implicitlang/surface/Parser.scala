@@ -9,8 +9,11 @@ import scala.util.parsing.combinator.JavaTokenParsers
 object Parser {
   val keywords: Set[String] = Set(
     "let", "def", "implement", "instance", "given", "implicit", "using", "trait", "type", "where", "and", "in",
-    "forall", "summon", "Int", "String", "Bool", "true", "false"
+    "forall", "summon"
   )
+  val primitiveTypes: Set[String] = Set("Int", "String", "Bool")
+  val literals: Set[String] = Set("true", "false")
+  val reservedWords: Set[String] = keywords ++ primitiveTypes ++ literals
 }
 
 /** A program has a declaration prefix and a final expression; let and given bind within expressions. */
@@ -22,7 +25,7 @@ final class Parser extends JavaTokenParsers {
   }
 
   private def name: Parser[String] = ident ^? (
-    { case value if !implicitlang.surface.Parser.keywords.contains(value) => value },
+    { case value if !implicitlang.surface.Parser.reservedWords.contains(value) => value },
     value => s"Reserved word '$value' cannot be a name"
   )
 

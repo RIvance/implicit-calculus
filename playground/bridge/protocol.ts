@@ -1,3 +1,9 @@
+export interface Language {
+  keywords: string[];
+  primitiveTypes: string[];
+  literals: string[];
+}
+
 export interface Diagnostic {
   code: string;
   message: string;
@@ -7,12 +13,19 @@ export interface Diagnostic {
 export interface Analysis {
   ok: boolean;
   type?: string;
-  implicitTerm?: string;
+  unresolvedTerm?: TermPart[];
   symbols?: { name: string; kind: 'type' | 'trait' | 'def' | 'instance' }[];
   diagnostic?: Diagnostic | null;
 }
 
+export type GoalLocation = (
+  'body' | 'value' | 'function' | 'argument' | 'receiver' | 'left' | 'right' | { field: string }
+)[];
+export type TermPart =
+  { kind: 'text'; text: string } | { kind: 'goal'; location: GoalLocation; name: string; type: string };
+
 export interface Goal {
+  location: GoalLocation;
   type: string;
   typeVariables: string[];
   instances: { index: number; name: string; type: string; form: string }[];

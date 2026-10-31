@@ -58,17 +58,6 @@ export function ResearchGuide({ onOpenExamples }: { onOpenExamples: () => void }
             </p>
           </Accordion.Panel>
         </Accordion.Item>
-        <Accordion.Item value="baseline">
-          <Accordion.Control>5. Compare with exact lookup</Accordion.Control>
-          <Accordion.Panel>
-            Exact lookup selects the nearest instance whose type is already the goal. SMT search additionally
-            instantiates polymorphic instances and supplies implicit prerequisites.
-            <p>
-              Use Compare search to run both strategies on the same source and bounds. Both paths use the compiler’s
-              evidence validation and core type checker.
-            </p>
-          </Accordion.Panel>
-        </Accordion.Item>
       </Accordion>
       <Group mt="xl">
         <Button variant="light" onClick={onOpenExamples}>

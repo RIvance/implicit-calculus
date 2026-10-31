@@ -1,5 +1,5 @@
-import type { Analysis, Runner } from './protocol';
+import type { Analysis, Language, Runner } from './protocol';
 
 export function analyze(source: string): Analysis;
-export function language(): { keywords: string[] };
+export function language(): Language;
 export function createRunner(): Promise<Runner>;

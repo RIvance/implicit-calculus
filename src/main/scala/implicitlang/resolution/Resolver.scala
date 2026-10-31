@@ -1,6 +1,6 @@
 package implicitlang.resolution
 
-import implicitlang.`implicit`.{ImplicitTerm, Elaborated, DisplayNames}
+import implicitlang.`implicit`.{ImplicitTerm, Elaborated, DisplayNames, TermChild, TermLocation}
 import implicitlang.core.{Type, Term, TypeChecker}
 import implicitlang.diagnostic.Error
 import implicitlang.synthesis.SynthesisContext
@@ -64,11 +64,14 @@ final class Resolver {
     }
   }
 
-  private def resolve(expression: ImplicitTerm, context: Context): Resolution[Term] = expression match {
+  private def resolve(
+    expression: ImplicitTerm, context: Context, location: TermLocation = TermLocation()
+  ): Resolution[Term] = expression match {
     case ImplicitTerm.Var(index) => Resolution.fromResult(lookup(context.ordinary, index, "Γ"))
     case ImplicitTerm.Instance(index) => Resolution.fromResult(lookup(context.instances, index, "Δ"))
     case ImplicitTerm.Lam(annotation, body, hint) => {
-      resolve(body, context.bindOrdinary(annotation, hint)).map(Term.Lam(annotation.erased, _))
+      resolve(body, context.bindOrdinary(annotation, hint), location / TermChild.Body)
+        .map(Term.Lam(annotation.erased, _))
     }
     /*
      * Γ, x:A; Δ ⊢ c ⟹ t
@@ -76,41 +79,47 @@ final class Resolver {
      * Γ; Δ ⊢ fix x:A.c ⟹ fix x:|A|.t
      */
     case ImplicitTerm.Fix(annotation, body, hint) => {
-      resolve(body, context.bindOrdinary(annotation, hint)).map(Term.Fix(annotation.erased, _))
+      resolve(body, context.bindOrdinary(annotation, hint), location / TermChild.Body)
+        .map(Term.Fix(annotation.erased, _))
     }
     case ImplicitTerm.ImplicitLam(annotation, body, hint) => {
-      resolve(body, context.bindInstance(annotation, hint)).map(Term.Lam(annotation.erased, _))
+      resolve(body, context.bindInstance(annotation, hint), location / TermChild.Body)
+        .map(Term.Lam(annotation.erased, _))
     }
     case ImplicitTerm.App(function, argument) => {
       for {
-        resolvedFunction <- resolve(function, context)
-        resolvedArgument <- resolve(argument, context)
+        resolvedFunction <- resolve(function, context, location / TermChild.Function)
+        resolvedArgument <- resolve(argument, context, location / TermChild.Argument)
       } yield Term.App(resolvedFunction, resolvedArgument)
     }
     case ImplicitTerm.ImplicitApp(function, argument) => {
       for {
-        resolvedFunction <- resolve(function, context)
-        resolvedArgument <- resolve(argument, context)
+        resolvedFunction <- resolve(function, context, location / TermChild.Function)
+        resolvedArgument <- resolve(argument, context, location / TermChild.Argument)
       } yield Term.App(resolvedFunction, resolvedArgument)
     }
-    case ImplicitTerm.TypeLam(body, hint) => resolve(body, context.bindType(hint)).map(Term.TypeLam.apply)
-    case ImplicitTerm.TypeApp(function, argument) => resolve(function, context).map(Term.TypeApp(_, argument.erased))
+    case ImplicitTerm.TypeLam(body, hint) => {
+      resolve(body, context.bindType(hint), location / TermChild.Body).map(Term.TypeLam.apply)
+    }
+    case ImplicitTerm.TypeApp(function, argument) => {
+      resolve(function, context, location / TermChild.Function).map(Term.TypeApp(_, argument.erased))
+    }
     case ImplicitTerm.Let(annotation, value, body, hint) => {
       for {
-        resolvedValue <- resolve(value, context)
-        resolvedBody <- resolve(body, context.bindOrdinary(annotation, hint))
+        resolvedValue <- resolve(value, context, location / TermChild.Value)
+        resolvedBody <- resolve(body, context.bindOrdinary(annotation, hint), location / TermChild.Body)
       } yield Term.Let(resolvedValue, resolvedBody)
     }
     case ImplicitTerm.Impl(annotation, value, body, hint) => {
       for {
-        resolvedValue <- resolve(value, context)
-        resolvedBody <- resolve(body, context.bindInstance(annotation, hint))
+        resolvedValue <- resolve(value, context, location / TermChild.Value)
+        resolvedBody <- resolve(body, context.bindInstance(annotation, hint), location / TermChild.Body)
       } yield Term.Let(resolvedValue, resolvedBody)
     }
-    case ImplicitTerm.Need(goal) => {
+    case ImplicitTerm.Need(goal, _) => {
       val request = SynthesisGoal(
         goal, SynthesisContext(context.instances.map(_.tpe), context.typeDepth),
-        context.ordinary.map(_.tpe), context.names
+        context.ordinary.map(_.tpe), context.names, location
       )
       Resolution.Request(request, report => {
         val checked = for {
@@ -127,13 +136,17 @@ final class Resolver {
     case ImplicitTerm.StringLit(value) => Resolution.fromResult(Result.Ok(Term.StringLit(value)))
     case ImplicitTerm.BoolLit(value) => Resolution.fromResult(Result.Ok(Term.BoolLit(value)))
     case ImplicitTerm.Record(fields) => {
-      Resolution.traverse(fields)(resolve(_, context)).map(Term.Record.apply)
+      Resolution.traverse(fields) { (label, value) =>
+        resolve(value, context, location / TermChild.Field(label))
+      }.map(Term.Record.apply)
     }
-    case ImplicitTerm.Proj(record, label) => resolve(record, context).map(Term.Proj(_, label))
+    case ImplicitTerm.Proj(record, label) => {
+      resolve(record, context, location / TermChild.Receiver).map(Term.Proj(_, label))
+    }
     case ImplicitTerm.BinOp(kind, left, right) => {
       for {
-        first <- resolve(left, context)
-        second <- resolve(right, context)
+        first <- resolve(left, context, location / TermChild.Left)
+        second <- resolve(right, context, location / TermChild.Right)
       } yield Term.BinOp(kind, first, second)
     }
   }

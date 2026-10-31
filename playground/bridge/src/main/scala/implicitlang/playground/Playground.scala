@@ -1,7 +1,7 @@
 package implicitlang.playground
 
 import implicitlang.{Compiler, Compilation, PreparedProgram}
-import implicitlang.`implicit`.{DisplayNames, ImplicitPrinter}
+import implicitlang.`implicit`.{DisplayNames, ImplicitPrinter, ImplicitTerm, TermChild, TermLocation}
 import implicitlang.core.{Evaluator, Term, Type, Value}
 import implicitlang.diagnostic.Error
 import implicitlang.resolution.{Resolution, ResolutionReport, SynthesisGoal}
@@ -18,7 +18,9 @@ import scala.scalajs.js.JSConverters.*
 object Playground {
   @JSExportTopLevel("language")
   def language(): js.Object = Presentation.obj(
-    "keywords" -> implicitlang.surface.Parser.keywords.toVector.sorted.toJSArray
+    "keywords" -> implicitlang.surface.Parser.keywords.toVector.sorted.toJSArray,
+    "primitiveTypes" -> implicitlang.surface.Parser.primitiveTypes.toVector.sorted.toJSArray,
+    "literals" -> implicitlang.surface.Parser.literals.toVector.sorted.toJSArray
   )
 
   @JSExportTopLevel("analyze")
@@ -129,7 +131,7 @@ private object Presentation {
   def prepared(program: PreparedProgram): js.Object = obj(
     "ok" -> true,
     "type" -> ImplicitPrinter.tpe(program.elaborated.tpe),
-    "implicitTerm" -> ImplicitPrinter.term(program.elaborated.expression),
+    "unresolvedTerm" -> unresolvedTerm(program.elaborated.expression),
     "symbols" -> program.source.declarations.flatMap { declaration =>
       import implicitlang.surface.Declaration
       declaration match {
@@ -142,7 +144,37 @@ private object Presentation {
     }.toJSArray
   )
 
+  private def location(value: TermLocation): js.Array[js.Any] = value.steps.map[js.Any] {
+    case TermChild.Body => "body"
+    case TermChild.Value => "value"
+    case TermChild.Function => "function"
+    case TermChild.Argument => "argument"
+    case TermChild.Receiver => "receiver"
+    case TermChild.Left => "left"
+    case TermChild.Right => "right"
+    case TermChild.Field(label) => obj("field" -> label)
+  }.toJSArray
+
+  private def unresolvedTerm(value: ImplicitTerm): js.Array[js.Object] = {
+    val parts = ImplicitPrinter.document(value)
+    val reserved = parts.collect { case ImplicitPrinter.Part.Goal(_, _, Some(hint)) => hint }.toSet
+    val (rendered, _) = parts.foldLeft((Vector.empty[js.Object], Set.empty[String])) {
+      case ((result, used), ImplicitPrinter.Part.Text(text)) =>
+        (result :+ obj("kind" -> "text", "text" -> text), used)
+      case ((result, used), ImplicitPrinter.Part.Goal(path, expectedType, hint)) => {
+        val base = hint.getOrElse("evidence")
+        val name = if !used(base) then base else {
+          Iterator.from(1).map(index => s"$base$index").find(name => !used(name) && !reserved(name)).get
+        }
+        val part = obj("kind" -> "goal", "location" -> location(path), "name" -> name, "type" -> expectedType)
+        (result :+ part, used + name)
+      }
+    }
+    rendered.toJSArray
+  }
+
   def goal(value: SynthesisGoal): js.Object = obj(
+    "location" -> location(value.location),
     "type" -> ImplicitPrinter.tpe(value.tpe, value.names),
     "typeVariables" -> value.names.types.toJSArray,
     "instances" -> value.context.instances.zipWithIndex.map { case (tpe, index) =>

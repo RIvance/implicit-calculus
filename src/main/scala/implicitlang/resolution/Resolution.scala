@@ -1,12 +1,15 @@
 package implicitlang.resolution
 
-import implicitlang.`implicit`.DisplayNames
+import implicitlang.`implicit`.{DisplayNames, TermLocation}
 import implicitlang.core.Type
 import implicitlang.diagnostic.Error
 import implicitlang.synthesis.{SynthesisContext, SynthesisReport, Synthesizer}
 import implicitlang.util.Result
 
-final case class SynthesisGoal(tpe: Type, context: SynthesisContext, ordinary: List[Type], names: DisplayNames)
+final case class SynthesisGoal(
+  tpe: Type, context: SynthesisContext, ordinary: List[Type], names: DisplayNames,
+  location: TermLocation = TermLocation()
+)
 final case class ResolvedGoal(request: SynthesisGoal, synthesis: SynthesisReport, validation: Result[Unit, Error])
 final case class ResolutionReport[+A](result: Result[A, Error], goals: Vector[ResolvedGoal])
 
@@ -44,9 +47,9 @@ object Resolution {
     Resolution.Complete(ResolutionReport(result, Vector.empty))
   }
 
-  def traverse[K, A, B](values: Map[K, A])(function: A => Resolution[B]): Resolution[Map[K, B]] = {
+  def traverse[K, A, B](values: Map[K, A])(function: (K, A) => Resolution[B]): Resolution[Map[K, B]] = {
     values.foldLeft(fromResult[Map[K, B]](Result.Ok(Map.empty))) { case (accumulated, (key, value)) =>
-      accumulated.flatMap(items => function(value).map(result => items.updated(key, result)))
+      accumulated.flatMap(items => function(key, value).map(result => items.updated(key, result)))
     }
   }
 }
