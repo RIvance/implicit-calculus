@@ -72,7 +72,22 @@ given second: Int = 22
   await expect(page.getByRole('region', { name: 'Unresolved term' })).toContainText('Run a program');
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{alpha = 11, result = 22, zebra = 22}');
-  await zebra.click();
+  await zebra.hover();
+  const preview = page.getByRole('tooltip', { name: '?zebra : Int ?zebra ≔ second', exact: true });
+  await expect(preview).toBeVisible();
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  await expect(zebra).toHaveText('?zebra');
+  await preview.hover();
+  await expect(preview).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(preview).not.toBeVisible();
+  await zebra.hover();
+  await expect(preview).toBeVisible();
+  await page.mouse.down();
+  await expect(zebra).toHaveText('?zebra');
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  await page.mouse.up();
+  await expect(preview).not.toBeVisible();
   await expect(zebra).toHaveText('?zebra : Int');
   await expect(first).toHaveText('?first');
   await expect(zebra).toHaveAttribute('aria-pressed', 'true');
@@ -86,6 +101,7 @@ given second: Int = 22
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?first : Int');
   await expect(page.locator('.context-count')).toHaveText('1 instances in scope');
   await expect(page.locator('.goal-result')).toHaveText('?first ≔ seed');
+  await page.getByText('Unresolved term', { exact: true }).hover();
   await first.hover();
   await expect(page.getByRole('tooltip', { name: '?first : Int ?first ≔ seed', exact: true })).toBeVisible();
   await page.screenshot({ path: '.cache/screenshots/unresolved-goals.png', fullPage: true });
@@ -111,6 +127,7 @@ found`,
   await expect(page.locator('.goal-result')).toHaveText('?found ≔ seed');
   await missing.click();
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?missing : String');
+  await page.getByText('Unresolved term', { exact: true }).hover();
   await missing.hover();
   await expect(
     page.getByRole('tooltip', { name: '?missing : String No evidence found for String.', exact: true }),
@@ -120,6 +137,70 @@ found`,
   await expect(
     page.getByRole('tooltip', { name: '?skipped : Bool Synthesis has not reached this goal.', exact: true }),
   ).toBeVisible();
+});
+
+test('keyboard previews preserve selection until activation and respect reduced motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('./');
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
+  await edit(page, 'instance seed: Int = 11\nlet first = summon[Int]\nlet second = summon[Int]\nfirst + second');
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.getByTestId('program-value')).toHaveText('22');
+  const first = page.getByRole('button', { name: 'Inspect goal ?first : Int', exact: true });
+  const second = page.getByRole('button', { name: 'Inspect goal ?second : Int', exact: true });
+  await first.focus();
+  await page.keyboard.press('Tab');
+  // The binding's fold control precedes its goal in keyboard order.
+  await expect(page.getByRole('button', { name: 'Fold second', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(second).toBeFocused();
+  await expect(second).toHaveText('?second');
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  const preview = page.getByRole('tooltip', { name: '?second : Int ?second ≔ seed', exact: true });
+  await expect(preview).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(preview).not.toBeVisible();
+  await expect(second).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(second).toHaveAttribute('aria-pressed', 'true');
+  await expect(second).toHaveText('?second : Int');
+  await expect(first).toHaveText('?first');
+  await expect(page.locator('.goal-result')).toHaveText('?second ≔ seed');
+  expect(await second.evaluate((element) => element.getAnimations({ subtree: true }).length)).toBe(0);
+  await first.focus();
+  await page.keyboard.press('Space');
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  await expect(first).toBeFocused();
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+});
+
+test('switching multiline annotations preserves the clicked goal position in a scrolled term', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
+  await edit(
+    page,
+    `type Evidence = { alpha: Int, beta: Int, gamma: Int, delta: Int, epsilon: Int }
+instance evidence: Evidence = { alpha = 1, beta = 2, gamma = 3, delta = 4, epsilon = 5 }
+${Array.from({ length: 16 }, (_, index) => `let before${index} = ${index}`).join('\n')}
+let first = summon[Evidence]
+let second = summon[Evidence]
+${Array.from({ length: 16 }, (_, index) => `let after${index} = ${index}`).join('\n')}
+second.alpha`,
+  );
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.getByTestId('program-value')).toHaveText('1');
+  const first = page.getByRole('button', { name: /^Inspect goal \?first :/ });
+  const second = page.getByRole('button', { name: /^Inspect goal \?second :/ });
+  await expect.poll(() => first.innerText()).toContain('\n');
+  await second.scrollIntoViewIfNeeded();
+  const before = (await second.boundingBox())!;
+  expect(await page.locator('.unresolved-code').evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await second.click();
+  await expect(second).toHaveAttribute('aria-pressed', 'true');
+  await expect(first).toHaveText('?first');
+  await expect.poll(() => second.innerText()).toContain('\n');
+  await expect.poll(async () => Math.abs((await second.boundingBox())!.y - before.y)).toBeLessThan(2);
+  await expect(page.locator('.goal-result')).toHaveText('?second ≔ evidence');
 });
 
 test('three columns keep compact goals, folding, and example selection connected', async ({ page }) => {
