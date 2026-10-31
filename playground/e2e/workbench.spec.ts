@@ -24,7 +24,7 @@ async function wordColors(page: Page) {
 
 test('type positions share one color, distinct from term names and keywords in both themes', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   const source = `trait ToString[A] = {
   toString: A -> String
 }
@@ -59,7 +59,7 @@ display[Int](1)`;
 
 test('named unresolved goals select the matching synthesis request and lexical context', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await edit(
     page,
     `instance seed: Int = 11
@@ -69,27 +69,31 @@ given second: Int = 22
   );
   const first = page.getByRole('button', { name: 'Inspect goal ?first : Int', exact: true });
   const zebra = page.getByRole('button', { name: 'Inspect goal ?zebra : Int', exact: true });
-  await expect(page.getByRole('region', { name: 'Unresolved term' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Unresolved term' })).toContainText('Run a program');
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{alpha = 11, result = 22, zebra = 22}');
   await zebra.click();
+  await expect(zebra).toHaveText('?zebra : Int');
+  await expect(first).toHaveText('?first');
   await expect(zebra).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?zebra : Int');
   await expect(page.locator('.context-count')).toHaveText('2 instances in scope');
   await first.click();
+  await expect(first).toHaveText('?first : Int');
+  await expect(zebra).toHaveText('?zebra');
   await expect(first).toHaveAttribute('aria-pressed', 'true');
   await expect(zebra).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?first : Int');
   await expect(page.locator('.context-count')).toHaveText('1 instances in scope');
   await expect(page.locator('.goal-result')).toHaveText('?first ≔ seed');
   await first.hover();
-  await expect(page.getByRole('tooltip', { name: '?first ≔ seed', exact: true })).toBeVisible();
+  await expect(page.getByRole('tooltip', { name: '?first : Int ?first ≔ seed', exact: true })).toBeVisible();
   await page.screenshot({ path: '.cache/screenshots/unresolved-goals.png', fullPage: true });
 });
 
 test('goal markers retain successes, explain failures, and distinguish goals not reached', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await edit(
     page,
     `instance seed: Int = 11
@@ -108,17 +112,76 @@ found`,
   await missing.click();
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?missing : String');
   await missing.hover();
-  await expect(page.getByRole('tooltip', { name: 'No evidence found for String.', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('tooltip', { name: '?missing : String No evidence found for String.', exact: true }),
+  ).toBeVisible();
   await expect(skipped).toHaveAttribute('aria-disabled', 'true');
   await skipped.hover();
-  await expect(page.getByRole('tooltip', { name: 'Synthesis has not reached this goal.', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('tooltip', { name: '?skipped : Bool Synthesis has not reached this goal.', exact: true }),
+  ).toBeVisible();
+});
+
+test('three columns keep compact goals, folding, and example selection connected', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
+  await page.locator('.editor-title').getByRole('button', { name: 'Examples', exact: true }).click();
+  const examples = page.getByRole('dialog', { name: 'Examples', exact: true });
+  await examples.getByRole('textbox', { name: 'Search examples' }).fill('display');
+  await examples.getByRole('button', { name: 'display Runnable program', exact: true }).click();
+  await expect(examples).not.toBeVisible();
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.getByTestId('program-value')).toHaveText('Student(Ada)');
+  const source = (await page.locator('.source-panel').boundingBox())!;
+  const term = (await page.locator('.term-panel').boundingBox())!;
+  const inspector = (await page.locator('.research-panel').boundingBox())!;
+  expect(term.x).toBeGreaterThanOrEqual(source.x + source.width);
+  expect(inspector.x).toBeGreaterThanOrEqual(term.x + term.width);
+  expect(term.height).toBe(source.height);
+  expect(inspector.height).toBe(source.height);
+  const first = page.getByRole('button', { name: 'Inspect goal ?δ₁ : {toString: String → String}', exact: true });
+  const second = page.getByRole('button', { name: 'Inspect goal ?δ₂ : {toString: A → String}', exact: true });
+  await expect(second).toHaveText('?δ₂');
+  await second.hover();
+  await expect(page.getByRole('tooltip', { name: /\?δ₂ : \{toString: A → String\}/ })).toBeVisible();
+  await second.click();
+  await expect(second).toHaveText('?δ₂ : {toString: A → String}');
+  await expect(first).toHaveText('?δ₁');
+  await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?δ₂ : {toString: A → String}');
+  const text = await page.locator('.unresolved-code').innerText();
+  expect(text).toMatch(/\n\s+toString =\n\s+λ/);
+  await page.getByRole('button', { name: 'Fold ToString1', exact: true }).click();
+  await expect(first).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Select synthesis goal' }).click();
+  await page.getByRole('option', { name: '?δ₁ : {toString: String → String}', exact: true }).click();
+  await expect(first).toBeVisible();
+  await expect(first).toHaveText('?δ₁ : {toString: String → String}');
+  const expanded = page.getByRole('button', { name: /^Inspect goal \?δ₃ :/ });
+  await expanded.click();
+  const divider = (await page.getByRole('separator').nth(1).boundingBox())!;
+  await page.mouse.move(divider.x + divider.width / 2, divider.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(term.x + 320, divider.y + 100, { steps: 10 });
+  await page.mouse.up();
+  await expect.poll(() => expanded.innerText()).toContain('\n');
+  await expect
+    .poll(async () => {
+      const marker = (await expanded.boundingBox())!;
+      const viewport = (await page.locator('.unresolved-code').boundingBox())!;
+      return marker.y >= viewport.y && marker.y + marker.height <= viewport.y + viewport.height;
+    })
+    .toBe(true);
+  expect(await page.locator('.unresolved-code').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  );
+  await page.screenshot({ path: '.cache/screenshots/three-columns.png', fullPage: true, animations: 'disabled' });
 });
 
 test('real synthesis supports graph, constraint, model, trace, and export inspection', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await edit(page, program);
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{item = 73}');
@@ -151,9 +214,9 @@ test('real synthesis supports graph, constraint, model, trace, and export inspec
   expect(errors).toEqual([]);
 });
 
-test('editing, sharing, history, diagnostics, and cancellation use the current source', async ({ page, context }) => {
+test('editing, sharing, diagnostics, and cancellation use the current source', async ({ page, context }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await edit(page, program.replace('73', '89'));
   await page.keyboard.press('ControlOrMeta+Enter');
   await expect(page.getByTestId('program-value')).toHaveText('{item = 89}');
@@ -179,14 +242,12 @@ test('editing, sharing, history, diagnostics, and cancellation use the current s
   await edit(page, '21');
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('21');
-  await page.getByText('History', { exact: true }).click();
-  await expect(page.locator('.library-list')).toContainText('{item = 89}');
 });
 
 test('the workbench remains usable on narrow screens and in dark mode', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
-  const separator = (await page.getByRole('separator').boundingBox())!;
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
+  const separator = (await page.getByRole('separator').first().boundingBox())!;
   await page.mouse.move(separator.x + separator.width / 2, separator.y + 100);
   await page.mouse.down();
   await page.mouse.move(400, separator.y + 100, { steps: 10 });
@@ -196,11 +257,12 @@ test('the workbench remains usable on narrow screens and in dark mode', async ({
   await expect
     .poll(async () => {
       const editor = (await page.locator('.source-panel').boundingBox())!;
+      const term = (await page.locator('.term-panel').boundingBox())!;
       const research = (await page.locator('.research-panel').boundingBox())!;
-      return research.y >= editor.y + editor.height;
+      return term.y >= editor.y + editor.height && research.y >= term.y + term.height;
     })
     .toBe(true);
-  await page.getByRole('button', { name: 'Programs', exact: true }).click();
+  await page.getByRole('button', { name: 'Examples', exact: true }).click();
   await page.getByRole('textbox', { name: 'Search examples' }).fill('synthesized totals');
   await page.getByRole('button', { name: /synthesized totals/ }).click();
   const header = page.locator('.editor-title');
@@ -215,7 +277,7 @@ test('the workbench remains usable on narrow screens and in dark mode', async ({
 
 test('search bounds and execution deadlines control real computations', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await edit(page, program);
   await page.getByRole('button', { name: 'Search settings', exact: true }).click();
   await page.getByRole('textbox', { name: 'Construction cost N' }).fill('3');
@@ -259,7 +321,7 @@ test('static hosting enables the solver without server headers and survives relo
   expect(response.headers()['cross-origin-opener-policy']).toBeUndefined();
   expect(response.headers()['cross-origin-embedder-policy']).toBeUndefined();
   await page.goto('./');
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
   expect(await page.evaluate(() => navigator.serviceWorker.controller?.scriptURL)).toBe(
     new URL('coi-serviceworker.js', baseURL).href,
@@ -268,7 +330,7 @@ test('static hosting enables the solver without server headers and survives relo
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{item = 73}');
   await page.reload();
-  await expect(page.getByText('Local solver ready', { exact: true })).toBeVisible();
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Run program' }).click();
   await expect(page.getByTestId('program-value')).toHaveText('{item = 73}');
 });

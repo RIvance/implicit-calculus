@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { createTheme, MantineProvider } from '@mantine/core';
 import { App } from './App';
 import { examples } from './examples';
-import { readDraft, readHistory, sharedDocument, type HistoryEntry } from './document';
+import { readDraft, sharedDocument } from './document';
 import '@mantine/core/styles.css';
 import './styles.css';
 
@@ -34,7 +34,7 @@ async function prepareBrowser(): Promise<boolean> {
       'The browser could not enable the solver. Open the playground directly in its own tab and allow service workers.',
     );
   }
-  document.getElementById('root')!.textContent = 'Preparing the local solver…';
+  document.getElementById('root')!.textContent = 'Preparing the Z3 backend…';
   const registration = await navigator.serviceWorker.register(workerUrl, { updateViaCache: 'none' });
   const worker = registration.installing ?? registration.waiting ?? registration.active;
   if (!worker) throw new Error('The browser could not start the playground setup.');
@@ -63,21 +63,15 @@ async function start() {
   const first = examples.find((example) => example.expectation === 'result');
   let initial = { name: first?.path ?? 'untitled.imp', source: first?.source ?? '' };
   let initialNotice: string | undefined;
-  let history: HistoryEntry[] = [];
   try {
     initial = (await sharedDocument()) ?? readDraft() ?? initial;
   } catch (error) {
     initialNotice = error instanceof Error ? error.message : 'The saved or shared document could not be read.';
   }
-  try {
-    history = readHistory();
-  } catch (error) {
-    initialNotice = error instanceof Error ? error.message : 'Run history could not be read.';
-  }
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <MantineProvider theme={theme} defaultColorScheme="light">
-        <App initial={initial} initialHistory={history} initialNotice={initialNotice} />
+        <App initial={initial} initialNotice={initialNotice} />
       </MantineProvider>
     </StrictMode>,
   );

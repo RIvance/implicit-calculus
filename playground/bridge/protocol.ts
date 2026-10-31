@@ -13,7 +13,7 @@ export interface Diagnostic {
 export interface Analysis {
   ok: boolean;
   type?: string;
-  unresolvedTerm?: TermPart[];
+  unresolvedTerm?: TermDocument;
   symbols?: { name: string; kind: 'type' | 'trait' | 'def' | 'instance' }[];
   diagnostic?: Diagnostic | null;
 }
@@ -21,8 +21,21 @@ export interface Analysis {
 export type GoalLocation = (
   'body' | 'value' | 'function' | 'argument' | 'receiver' | 'left' | 'right' | { field: string }
 )[];
-export type TermPart =
-  { kind: 'text'; text: string } | { kind: 'goal'; location: GoalLocation; name: string; type: string };
+export interface TermGoal {
+  kind: 'goal';
+  location: GoalLocation;
+  name: string;
+  annotation: TermDocument;
+}
+
+/** Layout choices retain goal occurrences and binding boundaries from the mathematical printer. */
+export type TermDocument =
+  | { kind: 'text'; text: string }
+  | TermGoal
+  | { kind: 'line'; flat: string | null }
+  | { kind: 'sequence'; parts: TermDocument[] }
+  | { kind: 'nest' | 'group'; body: TermDocument }
+  | { kind: 'fold'; location: GoalLocation; label: string; summary: TermDocument; body: TermDocument };
 
 export interface Goal {
   location: GoalLocation;

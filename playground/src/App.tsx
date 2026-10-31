@@ -22,7 +22,6 @@ import {
 import { useMediaQuery } from '@mantine/hooks';
 import { Group as PanelGroup, Panel, Separator } from 'react-resizable-panels';
 import {
-  BookOpen,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -30,7 +29,6 @@ import {
   Command,
   Download,
   Ellipsis,
-  FileCode2,
   FolderOpen,
   HelpCircle,
   History,
@@ -38,6 +36,7 @@ import {
   Moon,
   Pause,
   Play,
+  Plus,
   RotateCcw,
   Search,
   Share2,
@@ -51,10 +50,11 @@ import type { editor } from 'monaco-editor';
 import type { Analysis, GoalResult, Language, Progress, RunOptions, RunResult } from '../bridge/protocol';
 import { CompilerClient, Interrupted } from './compiler-client';
 import { examples } from './examples';
-import { download, draftKey, historyKey, shareDocument, type DocumentState, type HistoryEntry } from './document';
+import { download, draftKey, shareDocument, type DocumentState } from './document';
 import { SourceEditor } from './SourceEditor';
-import { UnresolvedTerm, goalName } from './UnresolvedTerm';
-import { Library } from './Library';
+import { UnresolvedTerm } from './UnresolvedTerm';
+import { goalName } from './term-document';
+import { Examples } from './Examples';
 import { EvidenceGraph } from './EvidenceGraph';
 import { ConstraintExplorer, CopyButton, ModelExplorer, SearchTrace } from './Inspectors';
 import { ResearchGuide } from './ResearchGuide';
@@ -69,15 +69,7 @@ const defaults: RunOptions = {
 type VisibleGoal = GoalResult & { pending?: boolean };
 type RuntimeState = 'loading' | 'ready' | 'idle' | 'failed';
 
-export function App({
-  initial,
-  initialHistory,
-  initialNotice,
-}: {
-  initial: DocumentState;
-  initialHistory: HistoryEntry[];
-  initialNotice?: string;
-}) {
+export function App({ initial, initialNotice }: { initial: DocumentState; initialNotice?: string }) {
   const [document, setDocument] = useState(initial);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [options, setOptions] = useState(defaults);
@@ -100,11 +92,10 @@ export function App({
   const [solverVersion, setSolverVersion] = useState('');
   const [language, setLanguage] = useState<Language>({ keywords: [], primitiveTypes: [], literals: [] });
   const [notice, setNotice] = useState(initialNotice ?? '');
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [examplesOpen, setExamplesOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareUrl, setShareUrl] = useState('');
-  const [history, setHistory] = useState<HistoryEntry[]>(initialHistory);
   const [wrap, setWrap] = useState(true);
   const [fontSize, setFontSize] = useState(14);
   const client = useRef<CompilerClient | null>(null);
@@ -114,7 +105,7 @@ export function App({
   const editor = useRef<editor.IStandaloneCodeEditor | null>(null);
   const upload = useRef<HTMLInputElement | null>(null);
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
-  const stacked = useMediaQuery('(max-width: 1000px)');
+  const stacked = useMediaQuery('(max-width: 1100px)');
 
   const connect = useCallback(() => {
     client.current?.dispose();
@@ -224,26 +215,6 @@ export function App({
     return () => clearTimeout(timer);
   }, [playing, attemptIndex, attempts.length]);
 
-  function record(document: DocumentState, options: RunOptions, result: RunResult) {
-    const entry: HistoryEntry = {
-      ...document,
-      id: crypto.randomUUID(),
-      time: Date.now(),
-      options,
-      ok: result.ok,
-      summary: result.value ?? result.diagnostic?.message ?? 'Compiled successfully',
-    };
-    setHistory((previous) => {
-      const next = [entry, ...previous].slice(0, 20);
-      try {
-        localStorage.setItem(historyKey, JSON.stringify(next));
-      } catch {
-        setNotice('Run history could not be saved in this browser.');
-      }
-      return next;
-    });
-  }
-
   const run = useCallback(async () => {
     if (busy) return;
     const worker = runtime === 'ready' || runtime === 'loading' ? client.current : connect();
@@ -326,7 +297,6 @@ export function App({
       setRunAnalysis(completed.analysis ?? null);
       if (completed.analysis && source.current === snapshot.source) setAnalysis(completed.analysis);
       setGoals(completed.goals ?? []);
-      record(snapshot, settings, completed);
     } catch (error) {
       if (activeRun.current !== identity) return;
       const diagnostic = {
@@ -361,7 +331,7 @@ export function App({
   }
   function open(next: DocumentState) {
     setDocument({ name: next.name, source: next.source });
-    setLibraryOpen(false);
+    setExamplesOpen(false);
   }
   function chooseGoal(index: number) {
     setSelectedGoal(index);
@@ -374,23 +344,6 @@ export function App({
     setPlaying(false);
     setSelectedAttempt(index);
   }
-  function clearHistory() {
-    setHistory([]);
-    try {
-      localStorage.removeItem(historyKey);
-    } catch {
-      setNotice('The browser could not clear saved history.');
-    }
-  }
-  const library = (
-    <Library
-      selected={document.name}
-      onOpen={open}
-      history={history}
-      clearHistory={clearHistory}
-      onNew={() => open({ name: 'untitled.imp', source: '' })}
-    />
-  );
   const diagnostic = result?.diagnostic ?? (!busy ? analysis?.diagnostic : null);
 
   return (
@@ -418,12 +371,12 @@ export function App({
             {runtime === 'loading' ? <Loader size={12} /> : <span className="status-dot" />}
             <span>
               {runtime === 'ready'
-                ? 'Local solver ready'
+                ? 'Z3 backend ready'
                 : runtime === 'loading'
-                  ? 'Loading solver'
+                  ? 'Loading Z3'
                   : runtime === 'failed'
-                    ? 'Solver unavailable'
-                    : 'Solver idle'}
+                    ? 'Z3 unavailable'
+                    : 'Z3 idle'}
             </span>
           </div>
           {runtime === 'failed' && (
@@ -454,35 +407,28 @@ export function App({
         </Alert>
       )}
       <div className="workspace">
-        <aside className="sidebar">
-          {library}
-          <div className="sidebar-footer">
-            <BookOpen size={14} />
-            <button onClick={() => setGuideOpen(true)}>How synthesis works</button>
-          </div>
-        </aside>
         <main className="workbench">
           <PanelGroup
             orientation={stacked ? 'vertical' : 'horizontal'}
             className="workspace-panels"
             id={stacked ? 'stacked' : 'wide'}
           >
-            <Panel id="editor" defaultSize="45%" minSize={stacked ? '450px' : '300px'} className="source-panel">
+            <Panel id="editor" defaultSize="32%" minSize={stacked ? '450px' : '300px'} className="source-panel">
               <div className="panel-title editor-title">
                 <Group gap={8} wrap="nowrap" className="source-document">
-                  <Tooltip label="Programs">
-                    <ActionIcon
-                      className="library-trigger"
-                      size="sm"
+                  <Tooltip label="Examples">
+                    <Button
+                      className="examples-trigger"
+                      size="compact-xs"
                       variant="subtle"
                       color="gray"
-                      aria-label="Programs"
-                      onClick={() => setLibraryOpen(true)}
+                      aria-label="Examples"
+                      leftSection={<FolderOpen size={14} />}
+                      onClick={() => setExamplesOpen(true)}
                     >
-                      <FolderOpen size={15} />
-                    </ActionIcon>
+                      Examples
+                    </Button>
                   </Tooltip>
-                  <FileCode2 size={15} className="source-file-icon" />
                   <strong title={document.name}>{document.name}</strong>
                   {editedExample && <span className="unsaved-dot" title="Edited example" />}
                 </Group>
@@ -505,6 +451,12 @@ export function App({
                       </ActionIcon>
                     </Menu.Target>
                     <Menu.Dropdown>
+                      <Menu.Item
+                        leftSection={<Plus size={14} />}
+                        onClick={() => open({ name: 'untitled.imp', source: '' })}
+                      >
+                        New program
+                      </Menu.Item>
                       <Menu.Item
                         leftSection={<Command size={14} />}
                         onClick={() => void editor.current?.getAction('editor.action.quickCommand')?.run()}
@@ -676,6 +628,16 @@ export function App({
               </section>
             </Panel>
             <Separator className="panel-separator" />
+            <Panel id="unresolved" defaultSize="33%" minSize={stacked ? '480px' : '300px'} className="term-panel">
+              <UnresolvedTerm
+                document={runAnalysis?.unresolvedTerm}
+                goals={goals}
+                selected={goalIndex}
+                stale={stale}
+                onSelect={chooseGoal}
+              />
+            </Panel>
+            <Separator className="panel-separator" />
             <Panel id="research" minSize={stacked ? '560px' : '360px'} className="research-panel">
               <div className="panel-title">
                 <Group gap="xs">
@@ -683,11 +645,6 @@ export function App({
                   <strong>Synthesis explorer</strong>
                 </Group>
                 <Group gap="xs">
-                  {stale && (
-                    <Badge color="orange" size="xs" variant="light">
-                      previous source
-                    </Badge>
-                  )}
                   <Badge color="gray" size="xs" variant="light">
                     {goals.length} goals
                   </Badge>
@@ -711,17 +668,6 @@ export function App({
                   </Tooltip>
                 </Group>
               </div>
-              {goals.length > 0 && runAnalysis?.unresolvedTerm && (
-                <UnresolvedTerm
-                  parts={runAnalysis.unresolvedTerm}
-                  goals={goals}
-                  selected={goalIndex}
-                  onSelect={(index) => {
-                    chooseGoal(index);
-                    setResearchTab('evidence');
-                  }}
-                />
-              )}
               {goals.length > 0 && (
                 <div className="goal-picker">
                   <Select
@@ -945,14 +891,14 @@ export function App({
           </footer>
         </main>
       </div>
-      <Drawer opened={libraryOpen} onClose={() => setLibraryOpen(false)} title="Programs" size="sm">
-        {library}
-      </Drawer>
+      <Modal opened={examplesOpen} onClose={() => setExamplesOpen(false)} title="Examples" size="lg" centered>
+        <Examples selected={document.name} onOpen={open} />
+      </Modal>
       <Drawer opened={guideOpen} onClose={() => setGuideOpen(false)} title="Research guide" position="right" size="lg">
         <ResearchGuide
           onOpenExamples={() => {
             setGuideOpen(false);
-            setLibraryOpen(true);
+            setExamplesOpen(true);
           }}
         />
       </Drawer>

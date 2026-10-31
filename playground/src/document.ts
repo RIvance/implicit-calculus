@@ -1,19 +1,8 @@
-import type { RunOptions } from '../bridge/protocol';
-
 export interface DocumentState {
   source: string;
   name: string;
 }
-export interface HistoryEntry extends DocumentState {
-  id: string;
-  time: number;
-  ok: boolean;
-  summary: string;
-  options: RunOptions;
-}
-
 export const draftKey = 'implicit:document:v1';
-export const historyKey = 'implicit:history:v1';
 
 export async function sharedDocument(): Promise<DocumentState | undefined> {
   const code = new URLSearchParams(location.hash.slice(1)).get('code');
@@ -69,27 +58,4 @@ export function readDraft(): DocumentState | undefined {
   )
     throw new Error('The saved document could not be read.');
   return { source: value.source, name: value.name };
-}
-
-export function readHistory(): HistoryEntry[] {
-  const stored = localStorage.getItem(historyKey);
-  if (!stored) return [];
-  const value: unknown = JSON.parse(stored);
-  if (
-    !Array.isArray(value) ||
-    !value.every(
-      (entry) =>
-        entry &&
-        typeof entry.source === 'string' &&
-        typeof entry.id === 'string' &&
-        typeof entry.name === 'string' &&
-        typeof entry.time === 'number' &&
-        typeof entry.summary === 'string' &&
-        typeof entry.ok === 'boolean' &&
-        entry.options,
-    )
-  ) {
-    throw new Error('The saved history could not be read.');
-  }
-  return value as HistoryEntry[];
 }

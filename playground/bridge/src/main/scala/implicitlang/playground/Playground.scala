@@ -155,22 +155,61 @@ private object Presentation {
     case TermChild.Field(label) => obj("field" -> label)
   }.toJSArray
 
-  private def unresolvedTerm(value: ImplicitTerm): js.Array[js.Object] = {
-    val parts = ImplicitPrinter.document(value)
-    val reserved = parts.collect { case ImplicitPrinter.Part.Goal(_, _, Some(hint)) => hint }.toSet
-    val (rendered, _) = parts.foldLeft((Vector.empty[js.Object], Set.empty[String])) {
-      case ((result, used), ImplicitPrinter.Part.Text(text)) =>
-        (result :+ obj("kind" -> "text", "text" -> text), used)
-      case ((result, used), ImplicitPrinter.Part.Goal(path, expectedType, hint)) => {
-        val base = hint.getOrElse("evidence")
-        val name = if !used(base) then base else {
-          Iterator.from(1).map(index => s"$base$index").find(name => !used(name) && !reserved(name)).get
+  private def unresolvedTerm(value: ImplicitTerm): js.Object = {
+    import ImplicitPrinter.Document
+    val document = ImplicitPrinter.document(value)
+    val reserved = document.goals.flatMap(_.nameHint).toSet
+    final case class Names(used: Set[String] = Set.empty, anonymous: Int = 0)
+
+    def render(document: Document, names: Names): (js.Object, Names) = document match {
+      case Document.Text(text) => (obj("kind" -> "text", "text" -> text), names)
+      case Document.Line(flat) => (obj("kind" -> "line", "flat" -> flat.orNull), names)
+      case Document.Goal(path, expectedType, hint) => {
+        val (annotation, afterAnnotation) = render(expectedType, names)
+        val (name, next) = hint match {
+          case Some(base) => {
+            val name = if !afterAnnotation.used(base) then base else {
+              Iterator.from(1).map(index => s"$base$index")
+                .find(name => !afterAnnotation.used(name) && !reserved(name)).get
+            }
+            (name, afterAnnotation.copy(used = afterAnnotation.used + name))
+          }
+          case None => {
+            def label(index: Int): String = "δ" + index.toString.map(digit => "₀₁₂₃₄₅₆₇₈₉"(digit - '0'))
+            val index = Iterator.from(afterAnnotation.anonymous + 1).find { index =>
+              !afterAnnotation.used(label(index)) && !reserved(label(index))
+            }.get
+            val name = label(index)
+            (name, Names(afterAnnotation.used + name, index))
+          }
         }
-        val part = obj("kind" -> "goal", "location" -> location(path), "name" -> name, "type" -> expectedType)
-        (result :+ part, used + name)
+        (obj("kind" -> "goal", "location" -> location(path), "name" -> name, "annotation" -> annotation), next)
+      }
+      case Document.Sequence(parts) => {
+        val (rendered, next) = parts.foldLeft((Vector.empty[js.Object], names)) { case ((result, names), part) =>
+          val (value, next) = render(part, names)
+          (result :+ value, next)
+        }
+        (obj("kind" -> "sequence", "parts" -> rendered.toJSArray), next)
+      }
+      case Document.Nest(body) => {
+        val (rendered, next) = render(body, names)
+        (obj("kind" -> "nest", "body" -> rendered), next)
+      }
+      case Document.Group(body) => {
+        val (rendered, next) = render(body, names)
+        (obj("kind" -> "group", "body" -> rendered), next)
+      }
+      case Document.Fold(path, label, summary, body) => {
+        val (renderedSummary, afterSummary) = render(summary, names)
+        val (renderedBody, next) = render(body, afterSummary)
+        (obj(
+          "kind" -> "fold", "location" -> location(path), "label" -> label,
+          "summary" -> renderedSummary, "body" -> renderedBody
+        ), next)
       }
     }
-    rendered.toJSArray
+    render(document, Names())._1
   }
 
   def goal(value: SynthesisGoal): js.Object = obj(

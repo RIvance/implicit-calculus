@@ -31,12 +31,12 @@ browser loads these assets from the same host as the site.
 
 ## Explore a program
 
-- Browse the automatically discovered [project examples](../examples), filter expected values
-  or errors, import a `.imp` file, or start a new document. Example headings describe expected
+- Open **Examples** in the editor header to browse the automatically discovered [project examples](../examples)
+  and filter expected values or errors. Example headings describe expected
   outcomes; displayed execution results come from running the source.
 - Edit with syntax highlighting, completion, keyword help, parser diagnostics, find, folding,
   and Monaco's command palette. Run and search settings are in the editor header; its source actions
-  menu provides import, export, sharing, and restore. Press Ctrl/⌘ + Enter to run.
+  menu provides new documents, import, export, sharing, and restore. Press Ctrl/⌘ + Enter to run.
 - Select each synthesis goal and inspect its lexical Δ, surrounding Γ, and rigid type variables.
   Select a graph node to inspect the instance head, inferred type arguments, implicit dependencies,
   and corresponding constraints. Pan, zoom, and use the minimap to navigate larger constructions.
@@ -46,10 +46,12 @@ browser loads these assets from the same host as the site.
   encoding and any additional type-validity constraints required by a provisional candidate.
 - Step through or play back search attempts, inspect solver statistics, and adjust construction
   and type-height bounds.
-- Inspect named goals in the unresolved term, hover for their results, and select their synthesis details.
+- Read the formatted unresolved term in its own column and fold bindings to navigate longer programs.
+  Goals retain explicit names; unnamed goals use δ subscripts. Hover for the expected type and result,
+  or select a goal to expand its annotation and inspect its synthesis in the right column.
 - Inspect the core term, compile without evaluation, export the source or complete
-  report, restore source from run history, and share source through a compressed URL fragment.
-  The draft and history are stored in this browser. Source edits mark existing results as stale.
+  report, and share source through a compressed URL fragment.
+  The current draft is stored in this browser. Source edits mark existing results as stale.
 
 The interface supports resizable panels, narrow screens, dark mode, adjustable editor font
 size, and line wrapping. The research guide explains evidence construction and search bounds.
@@ -126,7 +128,7 @@ npm run test:e2e
 
 The compiler tests discover the example directory and run the Scala.js/WebAssembly pipeline.
 Playwright exercises editing, real synthesis, query export, graphs, models, playback,
-sharing, history, cancellation, bound changes, execution timeouts, and responsive layouts.
+sharing, cancellation, bound changes, execution timeouts, and responsive layouts.
 Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing Chromium executable, or install
 Playwright's Chromium with a project-local browser directory:
 

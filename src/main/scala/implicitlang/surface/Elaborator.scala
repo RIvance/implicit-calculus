@@ -67,10 +67,8 @@ final class Elaborator {
     bindings: List[Binding] = Nil,
     declarations: Map[String, TypeDeclaration] = Map.empty
   ) {
-    def bind(
-      name: String, tpe: Type, space: Space, hints: NameHints = NameHints.Unknown, nameHint: Option[String] = None
-    ): Scope = {
-      val displayName = nameHint.orElse(Option.when(!name.startsWith("@"))(name))
+    def bind(name: String, tpe: Type, space: Space, hints: NameHints = NameHints.Unknown): Scope = {
+      val displayName = Option.when(!name.startsWith("@"))(name)
       copy(bindings = Binding(name, tpe, space, hints, displayName) :: bindings)
     }
 
@@ -169,7 +167,7 @@ final class Elaborator {
     def enter(scope: Scope): Scope = {
       val parameterScope = parameters.foldLeft(scope)((current, name) => current.bindType(name))
       constraints.foldLeft(parameterScope) { (current, constraint) =>
-        current.bind("@constraint", constraint.tpe, Space.Instance, nameHint = Some(constraint.name))
+        current.bind("@constraint", constraint.tpe, Space.Instance)
       }
     }
 
@@ -180,8 +178,8 @@ final class Elaborator {
     }
 
     def nameHints(body: NameHints): NameHints = {
-      val constrained = constraints.foldRight(body) { (constraint, result) =>
-        NameHints.Parameter(Some(constraint.name), result)
+      val constrained = constraints.foldRight(body) { (_, result) =>
+        NameHints.Parameter(None, result)
       }
       parameters.foldRight(constrained)((_, result) => NameHints.Parameter(None, result))
     }
@@ -295,7 +293,7 @@ final class Elaborator {
       name: String, value: NamedTerm, space: Space, rest: List[Declaration], nameHint: Option[String] = None
     ): Result[NamedTerm, Error] = {
       val hint = nameHint.orElse(Option.when(!name.startsWith("@"))(name))
-      elaborateDeclarations(rest, body, scope.bind(name, value.tpe, space, value.hints, hint), expected).map { result =>
+      elaborateDeclarations(rest, body, scope.bind(name, value.tpe, space, value.hints), expected).map { result =>
         val expression = space match {
           case Space.Ordinary => ImplicitTerm.Let(value.tpe, value.expression, result.expression, Some(name))
           case Space.Instance => {
@@ -331,30 +329,12 @@ final class Elaborator {
 
   private def exposeExplicitArrow(value: NamedTerm): NamedTerm = value.tpe match {
     case Type.Implicit(parameter, result) => {
-      val hint = value.hints.parameter.orElse(Some(goalName(parameter)))
+      val hint = value.hints.parameter
       exposeExplicitArrow(NamedTerm(
         ImplicitTerm.ImplicitApp(value.expression, ImplicitTerm.Need(parameter, hint)), result, value.hints.result
       ))
     }
     case _ => value
-  }
-
-  private def goalName(tpe: Type): String = tpe match {
-    case Type.IntType => "Int"
-    case Type.StringType => "String"
-    case Type.BoolType => "Bool"
-    case Type.Variable(_) => "value"
-    case Type.Record(_) => "record"
-    case Type.Arrow(_, _) | Type.Implicit(_, _) => "function"
-    case Type.Forall(body) => goalName(body)
-  }
-
-  private def request(annotation: SurfaceType, tpe: Type): ImplicitTerm = {
-    val name = annotation match {
-      case SurfaceType.Named(name, _) => name
-      case _ => goalName(tpe)
-    }
-    ImplicitTerm.Need(tpe, Some(name))
   }
 
   /** None synthesizes a type; Some checks the term against an established expected type. */
@@ -499,7 +479,7 @@ final class Elaborator {
         )
       }
       case SurfaceExpr.Need(annotation) => {
-        resolveType(annotation, scope).map(tpe => NamedTerm(request(annotation, tpe), tpe))
+        resolveType(annotation, scope).map(tpe => NamedTerm(ImplicitTerm.Need(tpe), tpe))
       }
       case SurfaceExpr.Ascribe(value, annotation) => {
         for {
@@ -542,7 +522,7 @@ final class Elaborator {
       }
       case SurfaceExpr.QualifiedSelect(annotation, label) => {
         resolveSelectionType(annotation, scope).flatMap { tpe =>
-          select(NamedTerm(request(annotation, tpe), tpe), label, scope)
+          select(NamedTerm(ImplicitTerm.Need(tpe), tpe), label, scope)
         }
       }
       case SurfaceExpr.BinOp(kind, left, right) => {
@@ -585,7 +565,7 @@ final class Elaborator {
     candidates match {
       case (recordType, result) :: Nil => {
         val binding = scope.bindings.find(value => value.space == Space.Instance && value.tpe == recordType)
-        val hint = binding.flatMap(_.nameHint).orElse(Some(label))
+        val hint = binding.flatMap(_.nameHint)
         val hints = binding.map(_.hints.field(label).result).getOrElse(NameHints.Unknown)
         val method = ImplicitTerm.Proj(ImplicitTerm.Need(recordType, hint), label)
         Result.Ok(NamedTerm(ImplicitTerm.App(method, receiver.expression), result, hints))
