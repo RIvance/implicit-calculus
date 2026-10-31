@@ -3,7 +3,8 @@
 \usepackage{lmodern,microtype}
 \usepackage{amsmath,amssymb,mathtools,mathpartir}
 \usepackage[margin=21mm,headheight=14pt]{geometry}
-\usepackage{booktabs,listings,fancyhdr,xcolor}
+\usepackage{booktabs,listings,fancyhdr,xcolor,array}
+\usepackage{tikz}
 \usepackage[hidelinks]{hyperref}
 \definecolor{ink}{HTML}{263849}
 \pagestyle{fancy}
@@ -41,13 +42,13 @@
 \newcommand{\traittype}[1]{[\![#1]\!]}
 \begin{document}
 {\Large\bfseries\color{ink} SMT Synthesis of Implicit Implementations}\par
-{\small Calculus and formal specification \hfill 30 October 2026}
+{\small Calculus and formal specification \hfill 31 October 2026}
 
-The central problem is to construct typed evidence by composing available values,
-choosing polymorphic type arguments and implicit applications together.
-Section~\ref{sec:smt} formulates this search as bounded SMT satisfiability and develops
-a complete example from constraints to a model and its typing derivation. The calculus
-specifies which constructions are admissible and how their evidence enters a program.
+The central problem is to construct typed evidence by choosing type arguments and composing
+available implementations. Section~\ref{sec:smt} develops a bounded SMT formulation and examines
+where ordinary resolution suffices, where choices become NP-hard, and why unrestricted search
+cannot always terminate. The calculus specifies admissible constructions and how their
+evidence enters a program.
 
 \section{Types, expressions, and contexts}
 \[
@@ -914,61 +915,1201 @@ Those ordinary applications consume the synthesized dictionary and the caller's 
 
 \newpage
 \subsection{Model refinement and correctness}
-\textbf{Equivalent constraint simplification.} A known implementation type
-determines its initial sequence of eliminations. Interpreting that known structure
-with symbolic type arguments avoids asking SMT to rediscover it. When an inferred
-type becomes the function type, its constructor and the next elimination remain
-symbolic, including possible implicit application followed by type application.
-This is partial evaluation of the same constraints, not a separate matching algorithm.
-When no earlier spine exists, value application is impossible and its continuation
-is omitted.
+\label{sec:refinement}
+Fix well-formed inputs $\Gamma,\Delta,G$, bounds $N,H>0$, and a spine count
+$1\le n\le N$. Write $\Delta=[d_j:A_j]_{0\le j<m}$.
+Let $L$ be the record labels in $\Delta,G$, and let $\langle A\rangle$ denote
+the scoped, canonical type encoding of Section~5.3.
 
-Well-formedness and height constraints are enforced by model refinement. An initial
-model is provisional. Every active type-argument position is checked; for each
-violation, the solver receives the general constraint that this position must be
-well formed and within height $H$ whenever it is active. Search then resumes with
-the same spine count. Every added constraint is part of the bounded formulation and
-excludes no witness within its bounds. Each position can require this refinement at most once. Evidence
-is decoded only after all these obligations hold. The worked query includes these
-obligations explicitly as the guarded $\mathsf{Valid}_8$ constraints.
-
-\textbf{Soundness and bounded completeness.} Induction over the spine order, followed by its
-eliminations, derives $\Pj p A$ for a satisfying, validated model. Conversely, flattening
-each function position in an admissible evidence tree and ordering its argument
-subtrees before their uses yields such a program. Together with the label restriction
-argument, this preserves existence of witnesses whose spine representations meet
-the cost and type-argument height bounds. Completeness is relative to these bounds;
-solver timeouts or an \emph{unknown} answer may still prevent discovery.
-The resolver independently rechecks the decoded construction and its erased target;
-an SMT model is not a trusted typing derivation.
-
-\textbf{Interpreting failure.} If every permitted spine count gives an unsatisfiable
-query, the result normally means \emph{search limit exhausted}, not uninhabitability.
-There are two definite absence cases. Empty $\Delta$ admits no
-evidence leaves. Also, if neither the goal nor any type in $\Delta$ contains $\forall$,
-let $k$ be the number of distinct subtypes of those inputs. Elimination can only
-produce these types. Choose a least-height proof for each inhabited type; its
-dependencies have strictly smaller least heights. There are at most $k$ such
-proofs, and each head spine has at most $k$ nodes. A program of cost at most $k^2$
-therefore suffices whenever any proof exists. Unsatisfiability after covering that
-bound establishes absence. Otherwise exhaustion, solver unknown (including timeout),
-and solver failure remain distinct outcomes.
-
-\textbf{An intermediate type absent from the goal.}
-A type abstraction can provide an implementation of type
+\textbf{The complete bounded formula.}
+There are $n$ heads $j_i$, lengths $\ell_i$, and result types $U_i$.
+For each potential argument position $(i,t)$, the tagged argument is either
+$[b]$ (an encoded type) or $\{k\}$ (an earlier spine).
+The elimination relation is
 \[
- i:\forall A,B.\kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
- \qquad\kw{Repr}[A,B]=\{\kw{repr}:A\to B\}.
+\begin{aligned}
+ \mathcal E_i(T,[b],U)
+   &\iff \exists C.\ T=\forall.C\ \land\ U=I_0(C,b),\\
+ \mathcal E_i(T,\{k\},U)
+   &\iff 0\le k<i\ \land\ T=(U_k\Rightarrow U).
+\end{aligned}
 \]
-Given $r:\kw{Repr}[\kw{Person},\Str]$ and $s:\TS[\Str]$ in $\Delta$, the construction
+Using the intermediate types $T_{i,t}$ from Section~5.2, define
 \[
- p=i[\kw{Person}][\Str]\{r\}\{s\}
+\begin{aligned}
+ \Phi_n^0\ \coloneqq\
+ &\bigwedge_{0\le i<n}
+   \left(0\le j_i<m\ \land\ 0\le\ell_i<N\
+      \land\ T_{i,0}=\langle A_{j_i}\rangle\
+      \land\ U_i=T_{i,\ell_i}\right)\\
+ {}\land{}&
+ \bigwedge_{\substack{0\le i<n\\1\le t<N}}
+   \left(t\le\ell_i\ \Longrightarrow\
+     \mathcal E_i(T_{i,t-1},a_{i,t},T_{i,t})\right)\\
+ {}\land{}&
+ U_{n-1}=\langle G\rangle\
+ \land\ \sum_{i=0}^{n-1}(1+\ell_i)\le N.
+\end{aligned}
 \]
-satisfies $\Pj p{\TS[\kw{Person}]}$. Here $\TS[A]$ abbreviates the structural dictionary
-$\{\kw{toString}:A\to\Str\}$. Unlike $B_1$ in the worked query, the intermediate type
-$B$ does not occur in the goal: matching the available argument $r$ forces $B=\Str$,
-which in turn makes $s$ a suitable second argument. The SMT constraints express
-these coupled choices even when exact lookup cannot supply the goal directly.
+This formula enforces the construction, but still permits malformed or oversized
+type arguments. Define their validity by
+\[
+ \mathsf{Valid}(b)\iff
+ \exists B.\ \wf B\ \land\ h(B)\le H\
+ \land\ \mathsf{labels}(B)\subseteq L\ \land\ b=\langle B\rangle.
+\]
+The equality with $\langle B\rangle$ also requires the canonical record encoding.
+For the finite set of potential positions
+$J_n=\{(i,t)\mid0\le i<n,\ 1\le t<N\}$, put
+$b_{i,t}=b$ when $a_{i,t}=[b]$; its value is irrelevant when $a_{i,t}=\{k\}$.
+\[
+\begin{aligned}
+ \chi_{i,t}&\coloneqq t\le\ell_i\ \land\ a_{i,t}=[b_{i,t}],\\
+ V_{i,t}&\coloneqq \chi_{i,t}\Longrightarrow\mathsf{Valid}(b_{i,t}).
+\end{aligned}
+\]
+\[
+ \boxed{\Phi_n^\star\coloneqq\Phi_n^0\land\bigwedge_{j\in J_n}V_j.}
+\]
+Here $\chi_{i,t}$ says that the position is used as a type argument; unused positions
+impose no validity obligation.
+
+\textbf{Simplification preserves the same models of construction choices.}
+Known constructors reduce $\mathcal E_i$ by equalities:
+\[
+\begin{aligned}
+ \mathcal E_i(\forall.C,[b],U)&\iff U=I_0(C,b),&
+ \mathcal E_i(\forall.C,\{k\},U)&\iff\bot,\\
+ \mathcal E_i(P\Rightarrow Q,\{k\},U)
+   &\iff 0\le k<i\land U_k=P\land U=Q,&
+ \mathcal E_i(P\Rightarrow Q,[b],U)&\iff\bot.
+\end{aligned}
+\]
+For base types, rigid variables, ordinary arrows, and records, both eliminations
+are false. An unknown constructor retains the full relation $\mathcal E_i$.
+In particular, $i=0$ makes every implicit-argument case false.
+
+Let $\widehat\Phi_n^0$ result from these rewrites and substitution of determined
+intermediate types. If $\vec x$ are the retained construction choices and
+$\vec u,\vec v$ the auxiliary type variables before and after rewriting, then
+\[
+ \boxed{\exists\vec u.\ \Phi_n^0(\vec x,\vec u)
+       \iff \exists\vec v.\ \widehat\Phi_n^0(\vec x,\vec v).}
+\]
+Thus refinement may use either presentation of the construction constraints.
+
+\newpage
+\textbf{Refinement as a transition system.}
+Let $K\subseteq J_n$ contain the positions whose validity constraints have been added.
+For a model $M$ of the current query, define
+\[
+\begin{aligned}
+ \Phi_n(K)&\coloneqq\Phi_n^0\land\bigwedge_{j\in K}V_j,\\
+ \mathsf{Bad}(M)&\coloneqq
+   \{j\in J_n\mid M\models\chi_j\land\neg\mathsf{Valid}(b_j)\}.
+\end{aligned}
+\]
+A state $(n,K)$ starts with $K=\varnothing$, or with constraints retained from an
+earlier spine count. Its transitions are
+\begin{mathpar}
+\inferrule*[right=Refine]
+ {M\models\Phi_n(K)\\ \mathsf{Bad}(M)\ne\varnothing}
+ {(n,K)\longmapsto(n,K\cup\mathsf{Bad}(M))}
+
+\inferrule*[right=Validate]
+ {M\models\Phi_n(K)\\ \mathsf{Bad}(M)=\varnothing}
+ {(n,K)\longmapsto\mathsf{validated}(M)}
+
+\inferrule*[right=Exhaust]
+ {\Phi_n(K)\text{ unsatisfiable}}
+ {(n,K)\longmapsto\mathsf{exhausted}(n)}
+\end{mathpar}
+An $\mathsf{unknown}$ response yields neither validation nor exhaustion.
+
+Two invariants explain why refinement preserves bounded completeness:
+\[
+\begin{gathered}
+ \Phi_n^\star\Longrightarrow\Phi_n(K),\\
+ M\models\Phi_n(K)\Longrightarrow \mathsf{Bad}(M)\cap K=\varnothing,\\
+ K'=K\cup\mathsf{Bad}(M)\Longrightarrow
+ \left\{\begin{array}{l}
+  \Phi_n^\star\Longrightarrow\Phi_n(K')\Longrightarrow\Phi_n(K),\\
+  \mathsf{Bad}(M)\ne\varnothing\Longrightarrow M\not\models\Phi_n(K').
+ \end{array}\right.
+\end{gathered}
+\]
+Every valid model survives; the rejected model does not. Moreover,
+\[
+ M\models\Phi_n(K)\ \land\ \mathsf{Bad}(M)\ne\varnothing
+ \quad\Longrightarrow\quad
+ |J_n\setminus K'|<|J_n\setminus K|.
+\]
+There are at most $|J_n|=n(N-1)$ refining transitions at a fixed spine count,
+assuming solver calls return. Validation and exhaustion have exact meanings:
+\[
+\begin{aligned}
+ M\models\Phi_n(K)\ \land\ \mathsf{Bad}(M)=\varnothing
+   &\iff M\models\Phi_n^\star,\\
+ \Phi_n(K)\text{ unsatisfiable}
+   &\Longrightarrow\Phi_n^\star\text{ unsatisfiable}.
+\end{aligned}
+\]
+
+\textbf{A refinement step.}
+Take $\Gamma=\cdot$, $\Delta=[r:\forall A.G]$, $G=\{\kw{done}:\Int\}$,
+$N=2$, $H=1$, and $n=1$. For the construction $r[B]$,
+\[
+ j_0=0,\quad\ell_0=1,\quad U_0=\langle G\rangle,\quad
+ 1+\ell_0=2.
+\]
+The result does not constrain $B$. The relaxed formula $\Phi_1^0$ admits all three
+rows, but the full formula admits only the last:
+\[
+\begin{array}{c|c|c}
+ b_{0,1} & \mathsf{Valid}(b_{0,1}) & \text{reason}\\ \hline
+ \underline 0 & \bot & \text{no ambient type variable}\\
+ \langle\Int\to\Int\rangle & \bot & h(\Int\to\Int)=2>H\\
+ \langle\Int\rangle & \top & \text{closed, canonical, height }1
+\end{array}
+\]
+Rejecting the first model adds $V_{0,1}$, which also excludes the second:
+\[
+ \Phi_1(\varnothing)\ \longmapsto\
+ \Phi_1(\{(0,1)\})=\Phi_1^\star.
+\]
+The added constraint states the full obligation at that position; it is stronger
+than merely forbidding $b_{0,1}=\underline0$.
+
+\newpage
+\textbf{Decoding and soundness.}
+For $M\models\Phi_n^\star$, read the chosen heads, lengths, and arguments from $M$.
+Define every evidence prefix in increasing lexicographic order of $(i,t)$:
+\[
+\begin{aligned}
+ p_{i,0}&=d_{j_i},\\
+ p_{i,t}&=
+ \begin{cases}
+  p_{i,t-1}[B],&a_{i,t}=[\langle B\rangle],\\
+  p_{i,t-1}\{p_{k,\ell_k}\},&a_{i,t}=\{k\}.
+ \end{cases}
+\end{aligned}
+\]
+The dependency $k<i$ makes this definition well founded. The induction invariant is
+\[
+ \boxed{\forall 0\le i<n,\ 0\le t\le\ell_i.\quad
+  \exists A_{i,t}.\ T_{i,t}^{M}=\langle A_{i,t}\rangle\
+  \land\ \Pj{p_{i,t}}{A_{i,t}}.}
+\]
+The three cases are precisely the evidence rules, with their premises supplied
+by the model:
+\[
+\begin{array}{c|c|c}
+ \text{position} & \text{model or induction premise} & \text{evidence conclusion}\\ \hline
+ t=0 & d_{j_i}:A_{j_i}\in\Delta
+   & \Pj{d_{j_i}}{A_{j_i}}\\[4pt]
+ a_{i,t}=[\langle B\rangle]
+   & A_{i,t-1}=\forall\alpha.C,\quad\wf B
+   & \Pj{p_{i,t-1}[B]}{C[B/\alpha]}\\[4pt]
+ a_{i,t}=\{k\}
+   & A_{i,t-1}=P\Rightarrow Q,\quad A_{k,\ell_k}=P
+   & \Pj{p_{i,t-1}\{p_{k,\ell_k}\}}Q
+\end{array}
+\]
+Canonical encoding commutes with the scoped substitution $I_0$, so the type-application
+case gives $T_{i,t}^{M}=\langle C[B/\alpha]\rangle$.
+The final equality $U_{n-1}=\langle G\rangle$ yields
+\[
+ \boxed{M\models\Phi_n^\star
+       \Longrightarrow \Pj{p_{n-1,\ell_{n-1}}}G.}
+\]
+The decoded program also satisfies
+\[
+ \sum_{i=0}^{n-1}(1+\ell_i)\le N,\qquad
+ \forall B\text{ used as a type argument}.\ h(B)\le H.
+\]
+At the resolver boundary, acceptance requires the two independent judgments
+\[
+ \Pj p G
+ \qquad\text{and}\qquad
+ \erase\Gamma,\erase\Delta\vdash\erase p:\erase G,
+\]
+where $\erase\Gamma,\erase\Delta$ is the merged target context of Section~6.
+
+\textbf{Encoding and bounded completeness.}
+Let $\mathcal W_{n,N,H}$ be the well-typed $n$-spine programs of Section~5.2
+with final type $G$, cost at most $N$, and type-argument heights at most $H$.
+Write $\mathcal W^L_{n,N,H}$ for those using only labels in $L$ in type arguments.
+For $\pi\in\mathcal W^L_{n,N,H}$, define an assignment $M_\pi$ by
+\[
+\begin{array}{c|c}
+ \text{symbolic variable} & \text{value from }\pi\\ \hline
+ j_i,\ell_i & \text{head index and argument count of spine }i\\
+ a_{i,t} & [\langle B\rangle]\text{ or }\{k\}\text{ from its }t\text{-th argument}\\
+ T_{i,t} & \langle A\rangle\text{ for the type }A\text{ of that prefix}\\
+ U_i & T_{i,\ell_i}
+\end{array}
+\]
+Unused positions may be assigned arbitrarily. Each program-typing step satisfies
+the corresponding clause of $\mathcal E_i$; each type argument satisfies $V_{i,t}$.
+Consequently,
+\[
+ \pi\in\mathcal W^L_{n,N,H}
+ \Longrightarrow M_\pi\models\Phi_n^\star,
+ \qquad
+ \boxed{\Phi_n^\star\text{ satisfiable}\iff\mathcal W^L_{n,N,H}\ne\varnothing.}
+\]
+
+\newpage
+\textbf{Why the finite label vocabulary loses no bounded solution.}
+Define $F_L$ on types by restricting every record:
+\[
+ F_L(\{\ell_j:A_j\}_{j\in J})
+   =\{\ell_j:F_L(A_j)\mid j\in J,\ \ell_j\in L\}.
+\]
+It is the identity on variables and base types, and commutes with both arrows and
+$\forall$. Extend it to programs by transforming type arguments, leaving heads and
+spine references unchanged. Structural induction gives
+\[
+\begin{gathered}
+ F_L(G)=G,\qquad F_L(A_j)=A_j\quad(d_j:A_j\in\Delta),\\
+ F_L(C[B/\alpha])=F_L(C)[F_L(B)/\alpha],\qquad
+ h(F_L(B))\le h(B),\\
+ \operatorname{cost}(F_L(\pi))=\operatorname{cost}(\pi),\qquad
+ \pi\in\mathcal W_{n,N,H}\Longrightarrow F_L(\pi)\in\mathcal W^L_{n,N,H}.
+\end{gathered}
+\]
+The last implication follows by induction on the evidence derivation, using
+substitution commutation in P-Type-App. Since
+$\mathcal W^L_{n,N,H}\subseteq\mathcal W_{n,N,H}$,
+\[
+ \boxed{
+ \mathcal W_{n,N,H}\ne\varnothing
+ \iff \exists M.\ M\models\Phi_n^\star.}
+\]
+Together with the refinement invariant, this establishes preservation of every
+bounded existence question through label restriction, simplification, and refinement.
+
+\textbf{What exhaustion proves.}
+Write $\mathcal W_{N,H}=\bigcup_{1\le n\le N}\mathcal W_{n,N,H}$.
+Exhausting all spine counts establishes exactly
+\[
+ \left(\bigwedge_{n=1}^{N}\Phi_n^\star\text{ unsatisfiable}\right)
+ \iff \mathcal W_{N,H}=\varnothing.
+\]
+In general,
+\[
+ \mathcal W_{N,H}=\varnothing
+ \quad\not\Longrightarrow\quad
+ \neg\exists p.\ \Pj p G.
+\]
+There are two complete absence cases. First,
+\[
+ \Delta=[\,]\quad\Longrightarrow\quad\neg\exists p.\ \Pj p G
+ \qquad\text{(every evidence tree requires an instance leaf).}
+\]
+
+Second, assume every input type contains no $\forall$. Let $\mathsf{Sub}$ collect
+type subexpressions, and put
+\[
+ S=\mathsf{Sub}\bigl(\{G\}\cup\{A\mid d:A\in\Delta\}\bigr),\qquad k=|S|.
+\]
+All derivable types lie in $S$. For each inhabited $A\in S$, let $\rho(A)$ be the
+minimum height of an evidence derivation for $A$. Choose such a derivation and
+flatten its function position into a spine:
+\[
+ \text{argument type }B\text{ used for result }A
+ \quad\Longrightarrow\quad \rho(B)<\rho(A).
+\]
+Keep only the chosen spines needed by $G$, and order them by $\rho$.
+Every dependency then precedes its use, and the goal spine is last.
+Each elimination follows a proper codomain subexpression, so
+\[
+ \#\text{spines}\le k,\qquad
+ 1+\ell_i\le k,\qquad
+ \operatorname{cost}(\pi)\le k^2.
+\]
+There are no type arguments to constrain. Hence
+\[
+ \boxed{
+ N\ge k^2\ \land\ \mathcal W_{N,H}=\varnothing
+ \quad\Longrightarrow\quad \neg\exists p.\ \Pj p G.}
+\]
+Outside these complete cases, bounded exhaustion, solver $\mathsf{unknown}$,
+and failure to execute a solver query carry no unbounded absence judgment.
+
+\newpage
+\subsection{Polynomial resolution: computing dependencies from types}
+\label{sec:polynomial-resolution}
+We ask whether $\exists p.\ \Pj p G$, without a construction-cost limit.
+In the examples below $\Gamma=\cdot$. A \emph{monotype} contains no $\forall$;
+a \emph{closed} type has no free type variables.
+
+\textbf{Fixed dependencies.}
+Take a finite $\Delta$ and a closed goal $G$, with only monotypes in these inputs.
+Let $S$ be their set of type subexpressions, and let $\kw{Have}(A)$ mean that
+evidence of type $A$ is derivable. Implicit application gives the dependency rules
+\[
+ \underbrace{\kw{Have}(A\Rightarrow B)\ \land\ \kw{Have}(A)}_{\text{both prerequisites}}
+ \ \longrightarrow\ \kw{Have}(B)
+ \qquad(A\Rightarrow B\in S).
+\]
+These dependencies are \emph{fixed}: each prerequisite and result is an exact type
+already in $S$. Search decides which types are reachable; it does not choose a
+substitution that changes an edge's endpoints.
+
+For example, let $P,Q,R,X,Y,G$ be distinct closed record types, and take
+\[
+\begin{aligned}
+ \Delta=[\,d:P,\quad f:P\Rightarrow Q,\quad g:P\Rightarrow R,\quad
+ h:Q\Rightarrow R\Rightarrow G,\\
+ u:X\Rightarrow Y,\quad v:Y\Rightarrow X,\quad k:Y\Rightarrow G\,].
+\end{aligned}
+\]
+The diagram combines $h$'s two applications into one node requiring both inputs.
+Different ways to reach $G$ are alternatives.
+\begin{center}
+\begin{minipage}[c]{0.55\linewidth}
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,>=stealth,
+  typ/.style={circle,draw=ink,minimum size=7mm,inner sep=1pt},
+  reached/.style={typ,fill=ink!10},
+  dormant/.style={typ,dashed},
+  every edge/.style={draw,->}
+]
+\node[reached] (P) at (0,0) {$P$};
+\node[reached] (Q) at (1.6,0.9) {$Q$};
+\node[reached] (R) at (1.6,-0.9) {$R$};
+\node[draw=ink,fill=ink!10,align=center,inner sep=4pt] (h) at (3.1,0) {$h$\\[-2pt]\scriptsize both};
+\node[reached] (G) at (4.8,0) {$G$};
+\node[dormant] (X) at (1.6,-2.3) {$X$};
+\node[dormant] (Y) at (3.4,-2.3) {$Y$};
+\path (P) edge node[above left] {$f$} (Q)
+      (P) edge node[below left] {$g$} (R)
+      (Q) edge (h)
+      (R) edge (h)
+      (h) edge (G)
+      (X) edge[bend left=18] node[above] {$u$} (Y)
+      (Y) edge[bend left=18] node[below] {$v$} (X)
+      (Y) edge node[right] {$k$} (G);
+\node[above=3pt] at (P.north) {\scriptsize seed $d$};
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.42\linewidth}
+\centering
+\begin{tabular}{@{}cl@{}}
+\toprule
+Round & Newly available types\\
+\midrule
+$0$ & All types listed in $\Delta$\\
+$1$ & $Q,\ R$\\
+$2$ & $R\Rightarrow G$\\
+$3$ & $G$\\
+\bottomrule
+\end{tabular}
+
+\smallskip
+$X$ and $Y$ remain unavailable.\\
+Their cycle has no seed.
+\end{minipage}
+\end{center}
+A witness is $h\{f\{d\}\}\{g\{d\}\}:G$. In round $2$, the partial application
+$h\{f\{d\}\}$ supplies the function of type $R\Rightarrow G$.
+
+The general computation is the least closure
+\[
+ R_0=\{A\mid d:A\in\Delta\},\qquad
+ R_{i+1}=R_i\cup\{B\mid A\Rightarrow B\in R_i,\ A\in R_i\}.
+\]
+Every added type has evidence by implicit application. Conversely, induction on
+evidence puts every derivable type in this closure. Since $R_i\subseteq S$,
+at most $|S|$ additions are possible; a cycle cannot require endless revisiting.
+This decides existence in polynomial time. Viewed as a finite system of Horn rules,
+the closure has a linear-time algorithm in the explicit rule-set size~\cite{dowling1984}.
+
+\newpage
+\textbf{Parameters determined by the goal.}
+Polymorphism introduces substitutions. For a rule
+\[
+ r:\forall\overline\alpha.\ P_1\Rightarrow\cdots\Rightarrow P_k\Rightarrow Q,
+\]
+let $P_i,Q$ be \emph{first-order type patterns}: monotypes whose free variables
+are parameters in $\overline\alpha$. A substitution $\theta$ assigns a closed
+monotype to each parameter. For a closed monotype goal $G$, define
+\[
+ \operatorname{Match}(r,G)=\{\theta\mid Q\theta=G\}.
+\]
+The goal \emph{determines the parameters of $r$} when
+$|\operatorname{Match}(r,G)|\leq1$: either $r$ cannot produce $G$, or there is
+exactly one possible list of type arguments. Its prerequisite types are then
+$P_1\theta,\ldots,P_k\theta$.
+With structural type equality, the condition
+\[
+ \overline\alpha\subseteq\operatorname{FV}(Q)
+ \qquad\text{(every quantified parameter occurs in the result)}
+\]
+ensures this property for every closed goal. It does not require a unique
+producer or a unique evidence term.
+
+For a concrete match, use dictionaries and pairs
+\[
+ D(A)=\{\kw{combine}:A\to A\to A\},\qquad
+ \kw{Pair}(A,B)=\{\kw{first}:A,\kw{second}:B\},
+\]
+with instances
+\[
+ d:D(\Int),\qquad
+ \kw{pair}:\forall A,B.\ D(A)\Rightarrow D(B)\Rightarrow D(\kw{Pair}(A,B)).
+\]
+The result equation exposes both parameters:
+\[
+\begin{aligned}
+ D(\kw{Pair}(A,B))&=D(\kw{Pair}(\Int,\kw{Pair}(\Int,\Int)))\\
+ &\quad\Longrightarrow\quad
+ \boxed{A=\Int,\qquad B=\kw{Pair}(\Int,\Int).}
+\end{aligned}
+\]
+There is no search over possible payload types at this step. The remaining work is
+to construct dictionaries at those two types:
+\[
+\begin{array}{c|c|c}
+ \text{goal} & \text{matching type arguments} & \text{prerequisites}\\ \hline
+ D(\kw{Pair}(\Int,\kw{Pair}(\Int,\Int)))
+   & A=\Int,\ B=\kw{Pair}(\Int,\Int)
+   & D(\Int),\ D(\kw{Pair}(\Int,\Int))\\[2pt]
+ D(\kw{Pair}(\Int,\Int))
+   & A=\Int,\ B=\Int & D(\Int),\ D(\Int)\\[2pt]
+ D(\Int) & \text{fact }d & \text{none}
+\end{array}
+\]
+A shared derivation makes the repeated prerequisite explicit:
+\[
+ z_0=d,\qquad
+ z_1=\kw{pair}[\Int][\Int]\{z_0\}\{z_0\},\qquad
+ z_2=\kw{pair}[\Int][\kw{Pair}(\Int,\Int)]\{z_0\}\{z_1\}.
+\]
+
+\textbf{Why this family is polynomial.}
+Restrict instances to closed facts $D(W)$ and rules of the form
+\[
+ \forall\overline\alpha.\,
+ D(U_1)\Rightarrow\cdots\Rightarrow D(U_k)\Rightarrow D(U),
+ \qquad
+ \overline\alpha\subseteq\operatorname{FV}(U),\quad U_i\triangleleft U,
+\]
+where all payloads are monotypes and $\triangleleft$ denotes a proper type
+subexpression. For a closed monotype goal $D(V)$,
+\[
+ \underbrace{\{\text{reachable goals}\}\subseteq
+   \{D(W)\mid W\text{ is a subexpression of }V\}}_{\text{polynomially many goals}},
+ \qquad
+ \underbrace{|\operatorname{Match}(r,D(W))|\leq1}_{\text{at most one substitution per rule and goal}}.
+\]
+Matching generates a polynomial-size dependency graph; closure decides existence
+and supplies a shared derivation. Polymorphism is allowed because this fragment
+controls both the number of goals and the substitutions that can connect them.
+
+\newpage
+\subsection{A parameter the goal leaves open}
+\label{sec:synthesis-hardness}
+Consider deriving a printer through a representation:
+\[
+\begin{gathered}
+ \kw{Repr}[A,B]=\{\kw{repr}:A\to B\},\qquad
+ \TS[A]=\{\kw{toString}:A\to\Str\},\\
+ i:\forall A,B.\ \kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A].
+\end{gathered}
+\]
+Let $\kw{Person}=\{\kw{name}:\Str\}$ and request $\TS[\kw{Person}]$. This time,
+\[
+ \underbrace{\TS[A]=\TS[\kw{Person}]}_{\text{result matching}}
+ \quad\Longrightarrow\quad A=\kw{Person},\qquad
+ \boxed{B\text{ remains free}.}
+\]
+In the notation just defined,
+$\operatorname{Match}(i,\TS[\kw{Person}])
+=\{[A\mapsto\kw{Person},B\mapsto T]\mid T\text{ is a closed monotype}\}$.
+The prerequisite types depend on a choice that result matching cannot make.
+
+Besides $i$, let $\Delta$ contain exactly
+$r_0:\kw{Repr}[\kw{Person},\Int]$,
+$r_1:\kw{Repr}[\kw{Person},\Str]$, and $s:\TS[\Str]$.
+\[
+\begin{array}{c|c|c|c}
+ \text{first prerequisite} & \text{forced choice} & \text{second prerequisite} & \text{outcome}\\ \hline
+ r_0 & B=\Int & \TS[\Int] & \text{unavailable}\\
+ r_1 & B=\Str & \TS[\Str] & s
+\end{array}
+\]
+Both representation choices match locally; only the second extends to evidence
+for the whole goal:
+\[
+ p=i[\kw{Person}][\Str]\{r_1\}\{s\}.
+\]
+This is the role of a shared type variable: the choice made for one prerequisite
+constrains the others.
+
+\textbf{Three locally solvable prerequisites with no joint solution.}
+Use two record families and four facts:
+\[
+\begin{aligned}
+ \kw{Same}(A,B)&=\{\kw{same}:\Int,\kw{left}:A,\kw{right}:B\},\\
+ \kw{Diff}(A,B)&=\{\kw{different}:\Int,\kw{left}:A,\kw{right}:B\},\\
+ s_0&:\kw{Same}(\Int,\Int),& s_1&:\kw{Same}(\Bool,\Bool),\\
+ d_0&:\kw{Diff}(\Int,\Bool),& d_1&:\kw{Diff}(\Bool,\Int).
+\end{aligned}
+\]
+Add only the producer
+\[
+ f:\forall A,B,C.\ \kw{Same}(A,B)\Rightarrow\kw{Same}(B,C)
+                  \Rightarrow\kw{Diff}(A,C)\Rightarrow G,
+ \qquad G=\{\kw{done}:\Int\}.
+\]
+The constraints on its three type arguments form a triangle:
+\begin{center}
+\begin{minipage}[c]{0.42\linewidth}
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,>=stealth,semithick]
+\node[circle,draw=ink,minimum size=7mm] (A) at (0,1.5) {$A$};
+\node[circle,draw=ink,minimum size=7mm] (B) at (1.8,0) {$B$};
+\node[circle,draw=ink,minimum size=7mm] (C) at (3.6,1.5) {$C$};
+\draw (A) -- node[below left] {\small Same} (B);
+\draw (B) -- node[below right] {\small Same} (C);
+\draw (A) -- node[above] {\small Diff} (C);
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.54\linewidth}
+Set $V_0=\Int$, $V_1=\Bool$ and write
+$A=V_a,\ B=V_b,\ C=V_c$. The facts force
+\[
+ \begin{gathered}
+ a,b,c\in\{0,1\},\\
+ a=b,\qquad b=c,\qquad a\ne c.
+ \end{gathered}
+\]
+Any two constraints can hold.\\
+All three cannot: $a=b=c$.
+\end{minipage}
+\end{center}
+Each prerequisite has candidates, but no substitution makes them succeed together.
+Replacing $\kw{Diff}(A,C)$ by $\kw{Same}(A,C)$ gives exactly two type assignments:
+$(\Int,\Int,\Int)$ and $(\Bool,\Bool,\Bool)$.
+Equality reasoning suffices for this small example; clause-shaped relations expose
+the harder general problem.
+
+\newpage
+\textbf{From shared choices to 3-SAT.}
+Let $\varphi=C_1\land\cdots\land C_m$ use variables $x_1,\ldots,x_n$, all occurring
+in clauses. Keep the truth codes $V_0=\Int$, $V_1=\Bool$. Each variable $x_i$
+will be represented by one type argument $\alpha_i$, shared across its clauses.
+
+For clause $C_j$, give a fresh record tag to the relation of satisfying assignments:
+\[
+ D_j(A,B,C)=\{\kw{tag}_j:\Int,\kw{first}:A,\kw{second}:B,\kw{third}:C\}.
+\]
+Install a fact $d_{j,(a,b,c)}:D_j(V_a,V_b,V_c)$ for each satisfying truth triple.
+For example,
+\[
+ C_j=x_u\lor\neg x_v\lor x_w
+ \quad\longmapsto\quad
+ (a,b,c)\in\{0,1\}^3\setminus\{(0,1,0)\}.
+\]
+Thus a clause contributes seven possible dictionaries, each recording one allowed
+assignment to its three positions. The required dictionary type is
+$Q_j(\overline\alpha)=D_j(\alpha_u,\alpha_v,\alpha_w)$.
+Here is how sharing works for two concrete clauses:
+\[
+\begin{array}{c|c|c}
+ \text{clause} & \text{prerequisite} & \text{chosen fact for }(x_1,x_2,x_3,x_4)=(1,0,1,0)\\ \hline
+ x_1\lor\neg x_2\lor x_3
+   & D_1(\alpha_1,\alpha_2,\alpha_3) & d_{1,(1,0,1)}\\
+ \neg x_1\lor x_3\lor x_4
+   & D_2(\alpha_1,\alpha_3,\alpha_4) & d_{2,(1,1,0)}
+\end{array}
+\]
+The two dictionaries must agree on $\alpha_1$ and $\alpha_3$; the shared parameter
+$\alpha_3$ moves from the third position to the second.
+
+Add one producer requiring all clauses:
+\[
+ f:\forall\alpha_1\cdots\alpha_n.\,
+ Q_1(\overline\alpha)\Rightarrow\cdots\Rightarrow Q_m(\overline\alpha)\Rightarrow G,
+ \qquad G=\{\kw{done}:\Int\}.
+\]
+Its type arguments are the assignment; its implicit arguments certify the clauses:
+\[
+ \underbrace{f[V_{b_1}]\cdots[V_{b_n}]}_{\text{one assignment for the whole formula}}
+ \underbrace{\{d_1\}\cdots\{d_m\}}_{\text{one satisfied-clause dictionary per clause}}
+ :G.
+\]
+
+\begin{center}
+\begin{tabular}{@{}p{0.47\linewidth}p{0.47\linewidth}@{}}
+\toprule
+Satisfying assignment $\longrightarrow$ evidence & Evidence $\longrightarrow$ satisfying assignment\\
+\midrule
+Choose $\alpha_i=V_{b_i}$. Every clause has an installed dictionary for its
+assigned triple, so all arguments of $f$ can be supplied.
+&
+Only $f$ produces $G$. Its arguments must be installed clause dictionaries.
+Their field types force every $\alpha_i$ to be $\Int$ or $\Bool$ and force
+each clause to be satisfied by that same assignment.\\
+\bottomrule
+\end{tabular}
+\end{center}
+Consequently,
+\[
+ \boxed{\varphi\text{ satisfiable}\iff
+        \exists p.\ \cdot;\Delta_\varphi\vdash_{\mathrm{ev}}p:G.}
+\]
+The construction has $7m$ facts and one producer, with size polynomial in $\varphi$.
+A witness costs $n+2m+1$ spine nodes, so the reduction also applies when that budget
+is part of the input. All values are realizable: dictionary fields use integer or
+Boolean literals, and $f$ returns $\{\kw{done}=0\}$.
+
+Evidence synthesis is therefore NP-hard~\cite{karp1972}, already with atomic type
+arguments. A complete polynomial algorithm for this fragment would imply
+$\mathsf P=\mathsf{NP}$. The source of difficulty is consistency across shared
+choices, even when each individual clause offers only seven candidates.
+
+\newpage
+\subsection{Termination: restrict the rules or bound the construction}
+\label{sec:decidable-resolution}
+NP-hardness concerns the cost of solving all inputs. Decidability asks whether an
+algorithm can always finish with a correct yes or no. We can retain polymorphic
+composition while obtaining termination in either of the following ways.
+
+\textbf{Unique matching does not ensure termination.}
+Reuse $D(A)=\{\kw{combine}:A\to A\to A\}$ and define
+$Z=\{\kw{zero}:\Int\}$, $S(A)=\{\kw{succ}:A\}$.
+Compare these two rules in separate instance environments:
+\[
+\begin{array}{c|c}
+ \kw{wrap}:\forall A.\ D(A)\Rightarrow D(S(A))
+   & \kw{unwrap}:\forall A.\ D(S(A))\Rightarrow D(A)
+\end{array}
+\]
+In each rule, the result determines $A$. But backward search moves in opposite
+directions; write $G\leadsto P$ when solving $G$ creates prerequisite $P$:
+\[
+\begin{array}{rcll}
+ D(S(S(Z)))&\leadsto D(S(Z))&\leadsto D(Z)
+   &\text{using }\kw{wrap},\\[2pt]
+ D(Z)&\leadsto D(S(Z))&\leadsto D(S(S(Z)))\leadsto\cdots
+   &\text{using }\kw{unwrap}.
+\end{array}
+\]
+With $s_0:D(Z)$, the first search finishes:
+\[
+ \kw{wrap}[S(Z)]\{\kw{wrap}[Z]\{s_0\}\}:D(S(S(Z))).
+\]
+With only $\kw{unwrap}$, the second search has no base case and keeps generating
+different goals. A test for repeated goals would not stop it.
+Yet rejecting $\kw{unwrap}$ entirely would discard valid constructions: adding
+$s_3:D(S(S(S(Z))))$ gives
+\[
+ \kw{unwrap}[Z]\{
+   \kw{unwrap}[S(Z)]\{
+     \kw{unwrap}[S(S(Z))]\{s_3\}\}\}:D(Z).
+\]
+A rule can fall outside a terminating fragment while still being useful.
+
+\textbf{A fragment where backward search always finishes.}
+For closed record goals, restrict $\Delta$ to closed record monotype facts and rules
+$r:\forall\overline\alpha.\ P_1\Rightarrow\cdots\Rightarrow P_k\Rightarrow Q$,
+where each $P_i$ and $Q$ is a record type pattern. Require
+\[
+\begin{array}{ll}
+ \overline\alpha\subseteq\operatorname{FV}(Q)
+   & \text{at most one substitution for each rule and goal},\\[2pt]
+ P_i\theta\prec Q\theta\quad\text{for every }i,\theta
+   & \text{every recursive call strictly decreases}.
+\end{array}
+\]
+Here $\prec$ is a fixed \emph{well-founded} order on closed record monotypes:
+there is no infinite sequence $T_0\succ T_1\succ T_2\succ\cdots$.
+For example, comparing the number of type-constructor occurrences makes
+$\kw{wrap}$ decrease in backward search and excludes $\kw{unwrap}$.
+The conditions are assumptions defining the fragment; a particular syntactic
+termination check must establish them.
+
+There are finitely many rules and at most one substitution for each. Hence the
+search tree is finitely branching. The decreasing order excludes infinite branches,
+so the tree is finite. Exhausting it decides existence.
+Type-class termination checks use this principle~\cite{ghc-termination}.
+The polynomial pair fragment in Section~\ref{sec:polynomial-resolution} additionally
+limits the number of distinct goals to the goal's subexpressions; descent alone
+does not supply that polynomial bound.
+
+\newpage
+\textbf{A fragment where each bounded construction is decidable.}
+Instead of restricting dependency growth, bound the evidence cost by $N$.
+Allow instance types $\forall\overline\alpha.\tau$, where $\tau$, the goal,
+and all inferred type arguments are monotypes. This permits the open parameter
+in the printer example and the shared choices in the 3-SAT reduction.
+
+First erase the unknown type arguments from a candidate program, leaving its
+instance heads, applications, and references to earlier spines. There are finitely
+many such structures of cost at most $N$. For each structure:
+\[
+ \boxed{\text{fresh type variables}}
+ \ \longrightarrow\
+ \boxed{\text{application and goal equations}}
+ \ \longrightarrow\
+ \boxed{\text{first-order unification}}.
+\]
+Unification uses the occurs check: an equation such as $A=S(A)$ has no finite-type
+solution. Unconstrained variables may be assigned $\Int$.
+No bound on the size of these monotype solutions is required.
+
+For example, two structures in the printer problem yield
+\[
+\begin{array}{c|c|c}
+ \text{candidate structure} & \text{equations} & \text{unification}\\ \hline
+ i[A][B]\{r_0\}\{s\}
+   & A=\kw{Person},\ B=\Int,\ B=\Str & \text{fails}\\
+ i[A][B]\{r_1\}\{s\}
+   & A=\kw{Person},\ B=\Str,\ B=\Str & [A\mapsto\kw{Person},B\mapsto\Str]
+\end{array}
+\]
+Each solution supplies a well-typed construction. Conversely, erasing type arguments
+from any permitted witness yields an enumerated structure, and its original type
+arguments solve that structure's equations. This gives a decision procedure for
+the cost-bounded, monotype-argument fragment, including instances that violate descent.
+
+\textbf{What SMT changes.}
+The bounded SMT formulation leaves both the construction choices and their type
+equations symbolic in one query. A constraint imposed by one prerequisite can
+therefore restrict choices for another before a complete construction is chosen.
+For the printer, the second prerequisite forces $B=\Str$, excluding $r_0$ as the
+first argument. The triangle example makes the same interaction inconsistent.
+
+\begin{center}
+\begin{tabular}{@{}p{0.20\linewidth}p{0.36\linewidth}p{0.36\linewidth}@{}}
+\toprule
+Method & What makes search finish & What it decides completely\\
+\midrule
+Dependency closure
+  & Finite input-type graph
+  & Existence for inputs containing no $\forall$\\[4pt]
+Descending resolution
+  & Finite rule choices; every prerequisite decreases
+  & Existence for the stated rule fragment\\[4pt]
+Bounded unification
+  & Finitely many structures; decidable type equations
+  & Existence up to cost $N$, with monotype arguments\\[4pt]
+Bounded SMT
+  & Bounded cost and type arguments; finite label vocabulary
+  & Existence within both bounds, including polymorphic arguments\\
+\bottomrule
+\end{tabular}
+\end{center}
+A long, uniquely determined derivation may exceed a fixed SMT budget while remaining
+accessible to descending resolution. Open type parameters exceed that rule fragment,
+but bounded unification and SMT can solve them.
+Within their common fragment, SMT offers a different way to organize the choices;
+a performance advantage must be measured.
+
+The bounded SMT existence problem is decidable. A solver's \emph{unknown} or timeout
+still does not prove absence. SMT is a framework whose general decidability depends
+on its theories~\cite{smt-theories}; the unrestricted synthesis problem below is
+where an unavoidable computability limit appears.
+
+\newpage
+\subsection{The unrestricted boundary: computation on types}
+\label{sec:unbounded-undecidability}
+The growing-goal example shows that one search strategy can diverge. To show that
+\emph{no} algorithm can always decide unrestricted synthesis, we encode a machine's
+halting question as an evidence request.
+
+A two-counter machine has a finite control state and two natural-number counters.
+Instructions increment a counter or test it for zero, decrementing it in the
+nonzero branch. Encode the counters and configurations by
+\[
+\begin{gathered}
+ Z=\{\kw{zero}:\Int\},\quad S(A)=\{\kw{succ}:A\},\quad \overline n=S^n(Z),\\
+ C_q(A,B)=\{\kw{state}_q:\Int,\kw{left}:A,\kw{right}:B\}.
+\end{gathered}
+\]
+For example, $(q,2,0)$ is represented by $C_q(S(S(Z)),Z)$.
+Different states use different field labels, so structural record equality
+distinguishes them.
+
+The initial evidence is $s:C_{q_0}(\overline{a_0},\overline{b_0})$.
+Each instruction becomes an instance:
+\[
+\begin{array}{l|l}
+ \text{machine transition} & \text{instance type}\\ \hline
+ (q,a,b)\mapsto(r,a+1,b)
+   & \forall A,B.\ C_q(A,B)\Rightarrow C_r(S(A),B)\\[3pt]
+ (q,0,b)\mapsto(r,0,b)
+   & \forall B.\ C_q(Z,B)\Rightarrow C_r(Z,B)\\[3pt]
+ (q,a+1,b)\mapsto(t,a,b)
+   & \forall A,B.\ C_q(S(A),B)\Rightarrow C_t(A,B)
+\end{array}
+\]
+The last two rows are the two branches of a zero-test/decrement instruction.
+The second counter uses symmetric rules. This instruction set includes a
+two-counter model whose halting problem is undecidable~\cite{dudenhefner2022}.
+
+\textbf{A run and its evidence, side by side.}
+Let $u$ increment the first counter from $q_0$ to $q_1$, let $v$ increment the
+second from $q_1$ to $q_2$, and let $w$ be the nonzero branch decrementing the first
+from $q_2$ to $q_h$:
+\[
+\begin{array}{c|c|l}
+ \text{machine configuration} & \text{evidence type} & \text{construction}\\ \hline
+ (q_0,0,0) & C_{q_0}(Z,Z) & z_0=s\\[3pt]
+ (q_1,1,0) & C_{q_1}(S(Z),Z) & z_1=u[Z][Z]\{z_0\}\\[3pt]
+ (q_2,1,1) & C_{q_2}(S(Z),S(Z)) & z_2=v[S(Z)][Z]\{z_1\}\\[3pt]
+ (q_h,0,1) & C_{q_h}(Z,S(Z)) & z_3=w[Z][S(Z)]\{z_2\}
+\end{array}
+\]
+Typing also rejects illegal machine steps. Applying $w$ when the first counter
+is zero would require
+\[
+ C_{q_2}(S(A),B)=C_{q_2}(Z,B)
+ \quad\Longrightarrow\quad
+ \{\kw{succ}:A\}=\{\kw{zero}:\Int\},
+\]
+which has no solution. The counter's representation enforces the branch condition.
+
+Redirect exits to a halting state $q_h$, and introduce
+\[
+ h:\forall A,B.\ C_{q_h}(A,B)\Rightarrow G,\qquad G=\{\kw{halted}:\Int\}.
+\]
+For the displayed run, $h[Z][S(Z)]\{z_3\}:G$.
+
+\newpage
+\textbf{Why the correspondence holds for every run.}
+Induction on a machine run constructs evidence for each reached configuration:
+the seed handles the initial state, and the corresponding instance handles each
+step. A halting run ends with an application of $h$.
+
+In the other direction, inspect the last step of a configuration proof.
+It is either the seed $s$, or a transition instance applied to another configuration
+proof. Record equality forces the correct state and counter patterns at every step.
+A partially instantiated or partially applied transition still has a universal
+or function type, so it cannot masquerade as a configuration. Induction therefore
+reconstructs a legal run from every configuration proof. Since only $h$ produces $G$,
+\[
+ \boxed{\text{machine halts}\iff
+        \exists p.\ \cdot;\Delta_M\vdash_{\mathrm{ev}}p:G.}
+\]
+This finite translation makes unrestricted synthesis undecidable, even with
+leading universals and record monotype arguments.
+The undecidability is in searching for a composition: each installed transition
+can be a terminating value that merely wraps or projects a counter field, and
+$h$ returns $\{\kw{halted}=0\}$.
+
+Finite evidence and its types can be enumerated and checked. Every halting run
+therefore has a finite witness that enumeration will eventually reach. This makes
+unrestricted synthesis \emph{semidecidable}: every yes-instance is eventually
+recognized. An exhaustive enumeration has the following contract:
+\[
+\begin{array}{c|c}
+ \exists p.\ \Pj p G & \text{eventually returns a witness}\\[3pt]
+ \nexists p.\ \Pj p G & \text{continues indefinitely}
+\end{array}
+\]
+A total decision procedure would also have to recognize every no-instance.
+Applied to $\Delta_M,G$, it would decide whether any given two-counter machine
+halts, contradicting the halting theorem. This is a limit on the unrestricted
+question itself, shared by SMT-based and specialized approaches.
+
+
+\newpage
+\subsection{Evidence inference in existing languages}
+\label{sec:existing-languages}
+Use $C(\overline A)$ for a class or trait obligation. Two different problems arise
+when a programmer omits arguments:
+\[
+\begin{array}{c|c|c}
+ \text{application after inserting unknowns} & \text{constraint} & \text{task}\\ \hline
+ \kw{id}[?A]\;3
+   & ?A=\Int & \text{infer a type argument}\\[3pt]
+ \kw{display}[?A]\{?d\}\;3
+   & ?A=\Int,\quad ?d:\TS[\Int] & \text{infer the type and construct evidence}
+\end{array}
+\]
+Here $\kw{id}:\forall A.A\to A$ and
+$\kw{display}:\forall A.\TS[A]\Rightarrow A\to\Str$.
+The first equation determines an omitted type. The second still leaves an evidence
+term to find. Lean and Rocq expose ordinary implicit arguments and typeclass search
+as separate elaboration mechanisms~\cite{lean-functions,rocq-implicit}.
+
+For a comparison with hidden type arguments, reuse Section~\ref{sec:synthesis-hardness}:
+\[
+ i:\forall A,B.\ \kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
+ \qquad G=\TS[\kw{Person}].
+\]
+After fixing $A=\kw{Person}$, the underlying evidence question in the available
+instance environment is
+\[
+ \boxed{\exists B,r,s.\quad
+ \Pj r{\kw{Repr}[\kw{Person},B]}\ \land\ \Pj s{\TS[B]}.}
+\]
+The issue is how each language constrains, infers, or searches for $B$.
+
+\textbf{Haskell: instance heads, termination conditions, and functional dependencies.}
+GHC selects instances by matching their heads against the wanted constraint.
+Under the ordinary non-overlapping policy, the match must be unique; prerequisite
+contexts do not disambiguate matching heads~\cite{ghc-termination}.
+For an instance $P_1,\ldots,P_k\Longrightarrow Q$, the default Paterson conditions
+include
+\[
+ \operatorname{occ}_\alpha(P_i)\le\operatorname{occ}_\alpha(Q),\qquad
+ |P_i|<|Q|,\qquad
+ P_i\text{ contains no type-family application}.
+\]
+Here $|P|$ counts type constructors and variables in the class arguments,
+and $\operatorname{occ}_\alpha(P)$ counts occurrences of $\alpha$.
+The printer rule fails the first condition for $B$:
+\[
+ \operatorname{occ}_B(\kw{Repr}[A,B])=1
+ \quad>\quad \operatorname{occ}_B(\TS[A])=0.
+\]
+The \texttt{UndecidableInstances} extension relaxes the declaration restrictions;
+GHC then retains a reduction-depth limit~\cite{ghc-termination}.
+
+A functional dependency $A\mapsto B$ on $\kw{Repr}$ supplies additional information:
+\[
+ \kw{Repr}[A,B_1]\land\kw{Repr}[A,B_2]\Longrightarrow B_1=B_2.
+\]
+It can make a parameter determined indirectly, even when absent from the result
+type~\cite{ghc-dependencies}. In the printer model, this law excludes simultaneous
+representations at $\Int$ and $\Str$ for the same $\kw{Person}$.
+It changes the permitted relation between types, and therefore the choice problem.
+
+\textbf{Rust: constrained implementation parameters and associated types.}
+Rust requires an implementation's type parameters to be constrained by its
+implementing type, trait arguments, or qualifying associated-type equalities.
+A direct translation of the printer rule leaves $B$ only in prerequisite bounds,
+so violates this requirement~\cite{rust-impl}.
+An associated type instead expresses
+\[
+ B=\operatorname{Out}_{\kw{Repr}}(A),\qquad
+ \kw{Repr}(A)\land\TS[\operatorname{Out}_{\kw{Repr}}(A)]
+ \Longrightarrow\TS[A].
+\]
+The representation type is an output of the selected trait implementation.
+Rust also rejects overlapping ordinary trait implementations and restricts
+implementation ownership through its orphan rules~\cite{rust-impl}.
+These coherence rules do not establish unrestricted termination: recursive trait
+requirements can overflow~\cite{rust-overflow}.
+
+\newpage
+\textbf{Scala 3: recursive construction with a preference policy.}
+Given instances and conditional givens supply values and producers whose context
+parameters induce further searches~\cite{scala-givens}.
+Scala 3 selects among eligible candidates using scope and specificity. Ambiguity
+in a recursive prerequisite propagates to the enclosing search; a divergent branch
+is treated as failure so that other alternatives can still be tried~\cite{scala-resolution}.
+
+Take distinct types $P,G$, with $a_0,a_1$ equally preferred in the same scope:
+\[
+ \Delta=[a_0:P,\ a_1:P,\ f:P\Rightarrow G].
+\]
+Then the evidence relation and the resolution policy answer different questions:
+\[
+\begin{array}{c|c}
+ \text{existence of typed evidence} & \text{Scala-style disambiguation}\\ \hline
+ f\{a_0\}:G,\quad f\{a_1\}:G
+   & \mathsf{search}(P)=\mathsf{ambiguous}\\
+ \exists p.\ \Pj p G
+   & \mathsf{search}(G)=\mathsf{ambiguous}
+\end{array}
+\]
+Thus existence alone is insufficient for a successful implicit call.
+Our bounded synthesizer accepts either composite witness; the Scala policy also
+asks whether its candidate preferences select one.
+
+\textbf{OCaml: explicit modules and the modular implicits proposal.}
+The standard OCaml module mechanism passes implementations explicitly through
+functors or first-class modules~\cite{ocaml-modules}.
+For the printer example, a caller can choose a representation module $R$ and a
+printer module $S$, subject to a type-sharing equation:
+\[
+ F(R)(S),\qquad R.\kw{input}=\kw{Person},\qquad
+ R.\kw{output}=S.\kw{input}.
+\]
+Module checking verifies this composition; the module arguments identify which
+implementations the caller selected.
+
+The modular implicits proposal adds automatic selection of implicit modules and
+applications of implicit functors~\cite{modular-implicits}. A typical recursive
+construction has the shape
+\[
+ \kw{PrintList}(\kw{PrintList}(\kw{PrintInt}))
+ \quad:\quad \TS[\kw{List}(\kw{List}(\Int))].
+\]
+Its scope admits multiple implementations, but resolution requires a unique solution.
+For repeated applications of the same implicit functor, the proposal checks
+decreasing constraints; here the payloads decrease as
+\[
+ \kw{List}(\kw{List}(\Int))
+ \ \leadsto\ \kw{List}(\Int)
+ \ \leadsto\ \Int.
+\]
+Failure of that termination check is an error: an unexplored branch could conceal
+a second solution, so finding one successful branch would not establish
+uniqueness~\cite{modular-implicits}.
+
+This gives a concrete contrast between search contracts:
+\[
+\begin{array}{c|c|c}
+ & \text{one finite solution found} & \text{another branch diverges}\\ \hline
+ \text{bounded existence} & \text{sufficient for success} & \text{outside the bounds is irrelevant}\\
+ \text{modular implicits} & \text{uniqueness still required} & \text{termination error}\\
+ \text{Scala 3} & \text{candidate preferences still apply} & \text{try other alternatives}
+\end{array}
+\]
+The modular implicits row describes the proposed extension, separately from
+OCaml's standard explicit module passing.
+
+\newpage
+\textbf{Lean 4: input modes, output parameters, and tabled resolution.}
+Lean uses ordinary implicit arguments for unification and instance-implicit
+arguments for typeclass synthesis~\cite{lean-functions}.
+For ordinary instances, unknown input parameters suspend search. Marking a parameter
+\texttt{outParam} permits synthesis to determine it; \texttt{semiOutParam} also
+permits an unknown output but uses a known value during matching~\cite{lean-synthesis}.
+For the representation relation, the distinction is
+\[
+\begin{array}{c|c}
+ \text{parameter modes} & \text{request with unknown }B\\ \hline
+ \kw{Repr}_{\mathrm{in,in}}[\kw{Person},?B]
+   & \text{stuck until }B\text{ becomes known}\\[3pt]
+ \kw{Repr}_{\mathrm{in,out}}[\kw{Person},?B]
+   & \text{may return }B=T,\quad r:\kw{Repr}[\kw{Person},T]
+\end{array}
+\]
+Default instances provide an additional fallback that can instantiate input
+parameters. Priorities and declaration order affect candidate selection;
+an output annotation permits inference, rather than imposing Haskell's
+functional-dependency law~\cite{lean-synthesis}.
+
+Lean's tabled resolution records search problems and their answers, addressing
+repeated work in diamonds and repeated visits to cycles~\cite{tabled-resolution}.
+These are distinct from generating infinitely many different goals:
+\[
+ \underbrace{D(T)\leadsto D(T)}_{\text{a repeated goal}}
+ \qquad\qquad
+ \underbrace{D(T)\leadsto D(S(T))\leadsto D(S(S(T)))\leadsto\cdots}_{\text{different goals}},
+\]
+where $S(T)=\{\kw{succ}:T\}$ and $D$ is the dictionary family from
+Section~\ref{sec:polynomial-resolution}.
+Lean also limits synthesized instance size and search work~\cite{lean-synthesis}.
+Tabling addresses the first phenomenon; it does not turn the unrestricted problem
+of Section~\ref{sec:unbounded-undecidability} into a decidable one.
+
+\textbf{Rocq (Coq): unification, typeclass proof search, and canonical structures.}
+Ordinary implicit arguments are inferred from other arguments and their types
+or from the expected context~\cite{rocq-implicit}.
+Typeclass resolution uses \texttt{typeclasses eauto}, registered hints, and
+unification. It can instantiate existential variables and backtrack; modes can
+instead require inputs to be known. Depth-first search is the default, with
+configurable breadth-first search and depth limits~\cite{rocq-typeclasses}.
+
+Consequently, the hidden-type problem can be explored as a proof-search tree.
+Write a state as $(\mathcal G;\sigma)$, with pending goals $\mathcal G$ and
+substitution $\sigma$:
+\[
+ \mathcal S_0=(\kw{Repr}[\kw{Person},B],\TS[B];\varnothing).
+\]
+\[
+\begin{aligned}
+ \mathcal S_0&\xrightarrow{r_0}
+   (\TS[\Int];[B\mapsto\Int])
+   \ \longrightarrow\ \mathsf{failure}\\
+ \mathcal S_0&\xrightarrow{r_1}
+   (\TS[\Str];[B\mapsto\Str])
+   \ \xrightarrow{s}\ (\varnothing;[B\mapsto\Str]).
+\end{aligned}
+\]
+Backtracking restores $\mathcal S_0$, including the unsolved $B$, before trying $r_1$.
+This trace assumes modes permit solving $B$ and alternatives remain available.
+In particular, Rocq's optional \texttt{Unique Instances} setting commits to a
+solved class goal, while \texttt{Unique Solutions} asks the search to establish
+uniqueness. Such settings change the search contract~\cite{rocq-typeclasses}.
+
+Canonical structures provide another way to recover an omitted record from
+a projection equation. For a registered structure $D_{\Int}$ with
+$\operatorname{carrier}(D_{\Int})=\Int$,
+\[
+ \operatorname{carrier}(?D)=\Int
+ \quad\leadsto\quad ?D=D_{\Int}.
+\]
+The canonical-structure registry indexes this extension of a projection to a
+record; it is distinct from typeclass hint search~\cite{rocq-canonical}.
+
+\newpage
+\textbf{Consequences for the SMT comparison.}
+The surveyed systems constrain different parts of the same inference problem:
+\begin{center}
+\begin{tabular}{@{}
+ >{\raggedright\arraybackslash}p{0.16\linewidth}
+ >{\raggedright\arraybackslash}p{0.39\linewidth}
+ >{\raggedright\arraybackslash}p{0.37\linewidth}@{}}
+\toprule
+System & How choices are controlled & How recursive search is controlled\\
+\midrule
+GHC
+  & Instance-head matching; overlap policy; functional dependencies
+  & Default declaration checks; reduction limit when relaxed\\[4pt]
+Rust
+  & Implementation constraints, associated types, coherence
+  & Trait-solving limits and overflow detection\\[4pt]
+Scala 3
+  & Scope and specificity; unresolved ambiguity is an error
+  & Divergence checks; alternative branches remain eligible\\[4pt]
+OCaml modules
+  & Caller supplies module arguments
+  & Explicit composition is checked\\[4pt]
+Modular implicits
+  & A unique implicit module expression is required
+  & Repeated functor applications must decrease\\[4pt]
+Lean 4
+  & Input/output modes, priorities, and default instances
+  & Tabled search plus size and work limits\\[4pt]
+Rocq
+  & Unification, hints, modes, and optional commitment/uniqueness
+  & Configurable proof-search strategy and depth\\[4pt]
+This calculus
+  & Any admissible bounded witness; nearest exact match first
+  & Construction-cost and type-argument bounds\\
+\bottomrule
+\end{tabular}
+\end{center}
+The concrete examples above motivate three separate comparison questions:
+\begin{center}
+\begin{tabular}{@{}
+ >{\raggedright\arraybackslash}p{0.30\linewidth}
+ >{\raggedright\arraybackslash}p{0.34\linewidth}
+ >{\raggedright\arraybackslash}p{0.28\linewidth}@{}}
+\toprule
+Family & Property being tested & Relevant comparison\\
+\midrule
+Finite dependency diamonds/cycles
+  & Reuse and termination & Closure or tabled resolution\\[4pt]
+Hidden parameters and shared clauses
+  & Consistent choices across prerequisites & Unification with backtracking\\[4pt]
+Multiple successful implementations
+  & Which witness is acceptable & Ambiguity and preference policies\\
+\bottomrule
+\end{tabular}
+\end{center}
+The first two concern finding evidence; the third concerns the meaning of accepting
+one witness among alternatives. For example, if two printing dictionaries return
+different strings, both can satisfy the same type while producing observably
+different results.
+
+Our formal claim is the bounded existence equivalence of Section~\ref{sec:refinement}.
+A performance comparison should give SMT and a specialized search the same evidence
+grammar, type equality, bounds, and witness-selection requirement. Lean's tabled
+resolution and Rocq's backtracking make composition and hidden-argument inference
+existing capabilities to compare against. The empirical question is how effectively
+SMT propagates shared constraints and excludes inconsistent combinations.
 
 \newpage
 \section{Resolution and lowering}
@@ -1207,5 +2348,107 @@ expression elaboration specified in Section~\ref{sec:syntax}, starting in empty 
 There is no runtime evidence search. Resolving an implementation binding produces an
 ordinary target \textsf{let}, so its value can close over ordinary runtime variables.
 The compiled value remains first-class; registration affects only lexical evidence scope.
+
+\newpage
+\begin{thebibliography}{99}
+\bibitem{karp1972}
+Richard M. Karp.
+\emph{Reducibility Among Combinatorial Problems}.
+In Complexity of Computer Computations, pp.~85--103, 1972.
+\href{https://doi.org/10.1007/978-1-4684-2001-2_9}{doi:10.1007/978-1-4684-2001-2\_9}.
+
+\bibitem{dowling1984}
+William F. Dowling and Jean H. Gallier.
+\emph{Linear-Time Algorithms for Testing the Satisfiability of Propositional Horn Formulae}.
+Journal of Logic Programming 1(3), pp.~267--284, 1984.
+\href{https://doi.org/10.1016/0743-1066(84)90014-1}{doi:10.1016/0743-1066(84)90014-1}.
+
+\bibitem{ghc-termination}
+The GHC Team.
+\emph{Instance declarations and resolution}.
+\href{https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/instances.html}
+ {GHC User's Guide}.
+
+\bibitem{dudenhefner2022}
+Andrej Dudenhefner.
+\emph{Certified Decision Procedures for Two-Counter Machines}.
+FSCD 2022, LIPIcs 228, pp.~16:1--16:18. Definition~2 and Theorem~6.
+\href{https://doi.org/10.4230/LIPIcs.FSCD.2022.16}{doi:10.4230/LIPIcs.FSCD.2022.16}.
+
+\bibitem{smt-theories}
+Clark Barrett, Cesare Tinelli, Haniel Barbosa, Aina Niemetz, Mathias Preiner,
+Andrew Reynolds, and Yoni Zohar.
+\emph{Satisfiability Modulo Theories: A Beginner's Tutorial}, section on SMT theories.
+\href{https://cvc5.github.io/tutorials/beginners/theories.html}{Online edition}.
+
+\bibitem{rust-impl}
+The Rust Project.
+\emph{The Rust Reference: Implementations}.
+\href{https://doc.rust-lang.org/reference/items/implementations.html}{Trait coherence and parameter constraints}.
+
+\bibitem{rust-overflow}
+The Rust Project.
+\emph{Error E0275: overflow evaluating a trait requirement}.
+\href{https://doc.rust-lang.org/stable/error_codes/E0275.html}{Error-code reference}.
+
+\bibitem{ghc-dependencies}
+The GHC Team.
+\emph{Functional dependencies}.
+\href{https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/functional_dependencies.html}{GHC User's Guide}.
+
+\bibitem{scala-givens}
+The Scala Team.
+\emph{Scala 3 Reference: Given instances}.
+\href{https://docs.scala-lang.org/scala3/reference/contextual/givens.html}{Given instances and conditional givens}.
+
+\bibitem{scala-resolution}
+The Scala Team.
+\emph{Scala 3 Reference: Changes in implicit resolution}.
+\href{https://docs.scala-lang.org/scala3/reference/changed-features/implicit-resolution.html}
+ {Scope, ambiguity, and divergence}.
+
+\bibitem{ocaml-modules}
+The OCaml Team.
+\emph{The OCaml 5.4 Manual: Module expressions; First-class modules}.
+\href{https://ocaml.org/manual/5.4/modules.html}{Modules and functors};
+\href{https://ocaml.org/manual/5.4/firstclassmodules.html}{first-class modules}.
+
+\bibitem{modular-implicits}
+Leo White, Fr\'ed\'eric Bour, and Jeremy Yallop.
+\emph{Modular implicits}. 2015.
+\href{https://arxiv.org/abs/1512.01895}{arXiv:1512.01895}, Sections~2.2 and~7.
+
+\bibitem{lean-functions}
+The Lean Team.
+\emph{The Lean Language Reference: Functions, implicit parameters}.
+\href{https://lean-lang.org/doc/reference/latest/Terms/Functions/}{Ordinary and instance-implicit parameters}.
+
+\bibitem{lean-synthesis}
+The Lean Team.
+\emph{The Lean Language Reference: Instance synthesis}.
+\href{https://lean-lang.org/doc/reference/latest/Type-Classes/Instance-Synthesis/}{Modes, search, and limits}.
+
+\bibitem{tabled-resolution}
+Daniel Selsam, Sebastian Ullrich, and Leonardo de Moura.
+\emph{Tabled Typeclass Resolution}. 2020.
+\href{https://arxiv.org/abs/2001.04301}{arXiv:2001.04301}.
+
+\bibitem{rocq-implicit}
+The Rocq Development Team.
+\emph{The Rocq Prover 9.3 Reference Manual: Implicit arguments}.
+\href{https://rocq-prover.org/doc/V9.3.0/refman/language/extensions/implicit-arguments.html}
+ {Argument inference and insertion}.
+
+\bibitem{rocq-typeclasses}
+The Rocq Development Team.
+\emph{The Rocq Prover 9.3 Reference Manual: Typeclasses}.
+\href{https://rocq-prover.org/doc/V9.3.0/refman/addendum/type-classes.html}{Typeclass search and its configuration}.
+
+\bibitem{rocq-canonical}
+Assia Mahboubi and Enrico Tassi.
+\emph{The Rocq Prover 9.3 Reference Manual: Canonical Structures}.
+\href{https://rocq-prover.org/doc/V9.3.0/refman/language/extensions/canonical.html}{Canonical structure inference}.
+
+\end{thebibliography}
 
 \end{document}
