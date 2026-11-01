@@ -1,0 +1,252 @@
+import ImplicitSynthesis.Syntax.Terms
+
+/-! Relational formation and typing. Record terms are checked by label. -/
+
+namespace ImplicitSynthesis
+
+set_option quotPrecheck false
+
+set_option hygiene false in
+scoped notation:50 q:51 " ⊢ⁱᵀ " A:51 => ImplicitWellFormed q A
+set_option hygiene false in
+scoped notation:50 q:51 " ⊢ᶜᵀ " A:51 => CoreWellFormed q A
+set_option hygiene false in
+scoped notation:50 q:51 " ; " Δ:51 " ⊢ᵉ " p:51 " ∶ " A:51 => EvidenceTyping q Δ p A
+set_option hygiene false in
+scoped notation:50 q:51 " ; " Γ:51 " ; " Δ:51 " ⊢ⁱ " c:51 " ∶ " A:51 => ImplicitTyping q Γ Δ c A
+set_option hygiene false in
+scoped notation:50 q:51 " ; " Γ:51 " ⊢ᶜ " t:51 " ∶ " A:51 => CoreTyping q Γ t A
+
+def Canonical (R : List (Label × α)) : Prop := R.Pairwise fun a b => a.1 < b.1
+
+inductive ImplicitWellFormed : Nat → ImplicitType → Prop where
+
+  -- ───────────── W-Int
+  -- q ⊢ Int type
+  | int : q ⊢ⁱᵀ .int
+
+  -- α < q
+  -- ───────────── W-Var
+  -- q ⊢ α type
+  | var : α < q → q ⊢ⁱᵀ .var α
+
+  -- q ⊢ A type    q ⊢ B type
+  -- ───────────────────────── W-Arrow
+  -- q ⊢ A → B type
+  | arrow : (q ⊢ⁱᵀ A) → (q ⊢ⁱᵀ B) → q ⊢ⁱᵀ .arrow A B
+
+  -- q ⊢ A type    q ⊢ B type
+  -- ───────────────────────── W-Implicit-Arrow
+  -- q ⊢ A ⇒ B type
+  | implicitArrow : (q ⊢ⁱᵀ A) → (q ⊢ⁱᵀ B) → q ⊢ⁱᵀ .implicitArrow A B
+
+  -- q + 1 ⊢ A type
+  -- ───────────────── W-All
+  -- q ⊢ ∀α. A type
+  | all : (q + 1 ⊢ⁱᵀ A) → q ⊢ⁱᵀ .all A
+
+  -- R represents a finite map    q ⊢ Aℓ type for every field ℓ
+  -- ──────────────────────────────────────────────────────── W-Record
+  -- q ⊢ {ℓ : Aℓ} type
+  | record :
+      Canonical R →
+      (∀ ℓ A, (ℓ, A) ∈ R → q ⊢ⁱᵀ A) →
+      q ⊢ⁱᵀ .record R
+
+inductive CoreWellFormed : Nat → CoreType → Prop where
+
+  -- ───────────── W-Int
+  -- q ⊢ Int type
+  | int : q ⊢ᶜᵀ .int
+
+  -- α < q
+  -- ───────────── W-Var
+  -- q ⊢ α type
+  | var : α < q → q ⊢ᶜᵀ .var α
+
+  -- q ⊢ A type    q ⊢ B type
+  -- ───────────────────────── W-Arrow
+  -- q ⊢ A → B type
+  | arrow : (q ⊢ᶜᵀ A) → (q ⊢ᶜᵀ B) → q ⊢ᶜᵀ .arrow A B
+
+  -- q + 1 ⊢ A type
+  -- ───────────────── W-All
+  -- q ⊢ ∀α. A type
+  | all : (q + 1 ⊢ᶜᵀ A) → q ⊢ᶜᵀ .all A
+
+  -- R represents a finite map    q ⊢ Aℓ type for every field ℓ
+  -- ──────────────────────────────────────────────────────── W-Record
+  -- q ⊢ {ℓ : Aℓ} type
+  | record :
+      Canonical R →
+      (∀ ℓ A, (ℓ, A) ∈ R → q ⊢ᶜᵀ A) →
+      q ⊢ᶜᵀ .record R
+
+inductive EvidenceTyping : Nat → List ImplicitType → Evidence → ImplicitType → Prop where
+
+  -- d : A ∈ Δ
+  -- ───────────── P-Instance
+  -- q; Δ ⊢ev d : A
+  | ref : Δ[d]? = some A → q ; Δ ⊢ᵉ .ref d ∶ A
+
+  -- q; Δ ⊢ev p : ∀α. A    q ⊢ B type
+  -- ───────────────────────────────── P-Type-App
+  -- q; Δ ⊢ev p[B] : A[B/α]
+  | typeApp :
+      (q ; Δ ⊢ᵉ p ∶ .all A) →
+      (q ⊢ⁱᵀ B) →
+      q ; Δ ⊢ᵉ .typeApp p B ∶ A.instantiate B
+
+  -- q; Δ ⊢ev p : A ⇒ B    q; Δ ⊢ev r : A
+  -- ───────────────────────────────────── P-Implicit-App
+  -- q; Δ ⊢ev p⟨r⟩ : B
+  | implicitApp :
+      (q ; Δ ⊢ᵉ p ∶ .implicitArrow A B) →
+      (q ; Δ ⊢ᵉ r ∶ A) →
+      q ; Δ ⊢ᵉ .implicitApp p r ∶ B
+
+inductive ImplicitTyping :
+  Nat → List ImplicitType → List ImplicitType → ImplicitTerm → ImplicitType → Prop where
+
+  -- x : A ∈ Γ
+  -- ───────────────── T-Var
+  -- q; Γ; Δ ⊢ x : A
+  | var : Γ[x]? = some A → q ; Γ ; Δ ⊢ⁱ .var x ∶ A
+
+  -- d : A ∈ Δ
+  -- ─────────────────── T-Instance
+  -- q; Γ; Δ ⊢ d : A
+  | instance : Δ[d]? = some A → q ; Γ ; Δ ⊢ⁱ .instance d ∶ A
+
+  -- ───────────────── T-Int
+  -- q; Γ; Δ ⊢ n : Int
+  | int : q ; Γ ; Δ ⊢ⁱ .int n ∶ .int
+
+  -- q ⊢ A type    q; Γ,x:A; Δ ⊢ c : B
+  -- ───────────────────────────────── T-Lambda
+  -- q; Γ; Δ ⊢ λ(x:A). c : A → B
+  | lam : (q ⊢ⁱᵀ A) → (q ; A :: Γ ; Δ ⊢ⁱ c ∶ B) → q ; Γ ; Δ ⊢ⁱ .lam A c ∶ .arrow A B
+
+  -- q ⊢ A type    q; Γ; d:A,Δ ⊢ c : B
+  -- ───────────────────────────────── T-Implicit-Lambda
+  -- q; Γ; Δ ⊢ λ⟨d:A⟩. c : A ⇒ B
+  | implicitLam :
+      (q ⊢ⁱᵀ A) → (q ; Γ ; A :: Δ ⊢ⁱ c ∶ B) → q ; Γ ; Δ ⊢ⁱ .implicitLam A c ∶ .implicitArrow A B
+
+  -- q; Γ; Δ ⊢ c₁ : A → B    q; Γ; Δ ⊢ c₂ : A
+  -- ──────────────────────────────────────── T-App
+  -- q; Γ; Δ ⊢ c₁ c₂ : B
+  | app : (q ; Γ ; Δ ⊢ⁱ c₁ ∶ .arrow A B) → (q ; Γ ; Δ ⊢ⁱ c₂ ∶ A) → q ; Γ ; Δ ⊢ⁱ .app c₁ c₂ ∶ B
+
+  -- q; Γ; Δ ⊢ c₁ : A ⇒ B    q; Γ; Δ ⊢ c₂ : A
+  -- ──────────────────────────────────────── T-Implicit-App
+  -- q; Γ; Δ ⊢ c₁⟨c₂⟩ : B
+  | implicitApp :
+      (q ; Γ ; Δ ⊢ⁱ c₁ ∶ .implicitArrow A B) →
+      (q ; Γ ; Δ ⊢ⁱ c₂ ∶ A) →
+      q ; Γ ; Δ ⊢ⁱ .implicitApp c₁ c₂ ∶ B
+
+  -- q+1; ↑Γ; ↑Δ ⊢ c : A
+  -- ───────────────────────── T-Type-Lambda
+  -- q; Γ; Δ ⊢ Λα. c : ∀α. A
+  | typeLam :
+      (q + 1 ; Γ.map (ImplicitType.rename Nat.succ) ; Δ.map (ImplicitType.rename Nat.succ) ⊢ⁱ c ∶ A) →
+      q ; Γ ; Δ ⊢ⁱ .typeLam c ∶ .all A
+
+  -- q; Γ; Δ ⊢ c : ∀α. A    q ⊢ B type
+  -- ───────────────────────────────── T-Type-App
+  -- q; Γ; Δ ⊢ c[B] : A[B/α]
+  | typeApp :
+      (q ; Γ ; Δ ⊢ⁱ c ∶ .all A) → (q ⊢ⁱᵀ B) → q ; Γ ; Δ ⊢ⁱ .typeApp c B ∶ A.instantiate B
+
+  -- q; Γ; Δ ⊢ c₁ : A    q; Γ,x:A; Δ ⊢ c₂ : B
+  -- ───────────────────────────────────────── T-Let
+  -- q; Γ; Δ ⊢ let x:A = c₁ in c₂ : B
+  | letIn : (q ; Γ ; Δ ⊢ⁱ c₁ ∶ A) → (q ; A :: Γ ; Δ ⊢ⁱ c₂ ∶ B) → q ; Γ ; Δ ⊢ⁱ .letIn A c₁ c₂ ∶ B
+
+  -- q; Γ; Δ ⊢ c₁ : A    q; Γ; d:A,Δ ⊢ c₂ : B
+  -- ───────────────────────────────────────── T-Instance-Let
+  -- q; Γ; Δ ⊢ instance d:A = c₁ in c₂ : B
+  | instanceLet :
+      (q ; Γ ; Δ ⊢ⁱ c₁ ∶ A) → (q ; Γ ; A :: Δ ⊢ⁱ c₂ ∶ B) → q ; Γ ; Δ ⊢ⁱ .instanceLet A c₁ c₂ ∶ B
+
+  -- q ⊢ A type    q; Γ,x:A; Δ ⊢ c : A
+  -- ───────────────────────────────── T-Fix
+  -- q; Γ; Δ ⊢ fix x:A. c : A
+  | fix : (q ⊢ⁱᵀ A) → (q ; A :: Γ ; Δ ⊢ⁱ c ∶ A) → q ; Γ ; Δ ⊢ⁱ .fix A c ∶ A
+
+  -- q ⊢ A type
+  -- ───────────────── T-Need
+  -- q; Γ; Δ ⊢ ?A : A
+  | need : (q ⊢ⁱᵀ A) → q ; Γ ; Δ ⊢ⁱ .need A ∶ A
+
+  -- q ⊢ {ℓ:Aℓ} type    r has exactly those labels    q; Γ; Δ ⊢ rℓ : Aℓ
+  -- ─────────────────────────────────────────────────────────────── T-Record
+  -- q; Γ; Δ ⊢ {ℓ=rℓ} : {ℓ:Aℓ}
+  | record :
+      (q ⊢ⁱᵀ .record R) →
+      (r.map Prod.fst).Perm (R.map Prod.fst) →
+      (∀ ℓ c A, (ℓ, c) ∈ r → (ℓ, A) ∈ R → q ; Γ ; Δ ⊢ⁱ c ∶ A) →
+      q ; Γ ; Δ ⊢ⁱ .record r ∶ .record R
+
+  -- q; Γ; Δ ⊢ c : {ℓ:Aℓ}    ℓ:A ∈ R
+  -- ───────────────────────────────── T-Project
+  -- q; Γ; Δ ⊢ c.ℓ : A
+  | proj : (q ; Γ ; Δ ⊢ⁱ c ∶ .record R) → (ℓ, A) ∈ R → q ; Γ ; Δ ⊢ⁱ .proj c ℓ ∶ A
+
+inductive CoreTyping : Nat → List CoreType → CoreTerm → CoreType → Prop where
+
+  -- x : A ∈ Γ
+  -- ─────────────── T-Var
+  -- q; Γ ⊢ x : A
+  | var : Γ[x]? = some A → q ; Γ ⊢ᶜ .var x ∶ A
+
+  -- ───────────────── T-Int
+  -- q; Γ ⊢ n : Int
+  | int : q ; Γ ⊢ᶜ .int n ∶ .int
+
+  -- q ⊢ A type    q; Γ,x:A ⊢ t : B
+  -- ────────────────────────────── T-Lambda
+  -- q; Γ ⊢ λ(x:A). t : A → B
+  | lam : (q ⊢ᶜᵀ A) → (q ; A :: Γ ⊢ᶜ t ∶ B) → q ; Γ ⊢ᶜ .lam A t ∶ .arrow A B
+
+  -- q; Γ ⊢ t₁ : A → B    q; Γ ⊢ t₂ : A
+  -- ────────────────────────────────── T-App
+  -- q; Γ ⊢ t₁ t₂ : B
+  | app : (q ; Γ ⊢ᶜ t₁ ∶ .arrow A B) → (q ; Γ ⊢ᶜ t₂ ∶ A) → q ; Γ ⊢ᶜ .app t₁ t₂ ∶ B
+
+  -- q+1; ↑Γ ⊢ t : A
+  -- ────────────────────── T-Type-Lambda
+  -- q; Γ ⊢ Λα. t : ∀α. A
+  | typeLam : (q + 1 ; Γ.map (CoreType.rename Nat.succ) ⊢ᶜ t ∶ A) → q ; Γ ⊢ᶜ .typeLam t ∶ .all A
+
+  -- q; Γ ⊢ t : ∀α. A    q ⊢ B type
+  -- ────────────────────────────── T-Type-App
+  -- q; Γ ⊢ t[B] : A[B/α]
+  | typeApp : (q ; Γ ⊢ᶜ t ∶ .all A) → (q ⊢ᶜᵀ B) → q ; Γ ⊢ᶜ .typeApp t B ∶ A.instantiate B
+
+  -- q; Γ ⊢ t₁ : A    q; Γ,x:A ⊢ t₂ : B
+  -- ────────────────────────────────── T-Let
+  -- q; Γ ⊢ let x = t₁ in t₂ : B
+  | letIn : (q ; Γ ⊢ᶜ t₁ ∶ A) → (q ; A :: Γ ⊢ᶜ t₂ ∶ B) → q ; Γ ⊢ᶜ .letIn t₁ t₂ ∶ B
+
+  -- q ⊢ A type    q; Γ,x:A ⊢ t : A
+  -- ────────────────────────────── T-Fix
+  -- q; Γ ⊢ fix x:A. t : A
+  | fix : (q ⊢ᶜᵀ A) → (q ; A :: Γ ⊢ᶜ t ∶ A) → q ; Γ ⊢ᶜ .fix A t ∶ A
+
+  -- q ⊢ {ℓ:Aℓ} type    r has exactly those labels    q; Γ ⊢ rℓ : Aℓ
+  -- ───────────────────────────────────────────────────────────── T-Record
+  -- q; Γ ⊢ {ℓ=rℓ} : {ℓ:Aℓ}
+  | record :
+      (q ⊢ᶜᵀ .record R) →
+      (r.map Prod.fst).Perm (R.map Prod.fst) →
+      (∀ ℓ t A, (ℓ, t) ∈ r → (ℓ, A) ∈ R → q ; Γ ⊢ᶜ t ∶ A) →
+      q ; Γ ⊢ᶜ .record r ∶ .record R
+
+  -- q; Γ ⊢ t : {ℓ:Aℓ}    ℓ:A ∈ R
+  -- ───────────────────────────── T-Project
+  -- q; Γ ⊢ t.ℓ : A
+  | proj : (q ; Γ ⊢ᶜ t ∶ .record R) → (ℓ, A) ∈ R → q ; Γ ⊢ᶜ .proj t ℓ ∶ A
+
+end ImplicitSynthesis
