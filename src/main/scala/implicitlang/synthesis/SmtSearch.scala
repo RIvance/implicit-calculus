@@ -119,7 +119,7 @@ object SmtSearch {
 }
 
 /**
- * p ::= d | p[A] | p{p}. A spine eliminates one Δ head from left to right, using earlier spines
+ * p ::= d | p[A] | p⟨p⟩. A spine eliminates one Δ head from left to right, using earlier spines
  * as implicit arguments. Known type structure is partially evaluated; inferred structure follows
  * the same typing rules symbolically. No ordinary application or fresh value is introduced.
  */
@@ -229,7 +229,7 @@ private final class EvidenceQuery(
                 val remainder = continue(Known(body, typeValue(argument) +: bindings), step + 1)
                 Formulas(Vector.empty, Vector(premise)) ++ remainder
               }
-              // Δ ⊢ p:A⇒B    Δ ⊢ q:A / Δ ⊢ p{q}:B                              P-Implicit-App
+              // Δ ⊢ p:A⇒B    Δ ⊢ q:A / Δ ⊢ p⟨q⟩:B                              P-Implicit-App
               case Known(Type.Implicit(parameter, result), bindings) => {
                 val premise = rule(
                   ConstraintRule.ImplicitApplication,

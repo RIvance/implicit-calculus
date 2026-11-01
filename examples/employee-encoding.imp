@@ -1,0 +1,32 @@
+// result: {element = {name = employeeId, text = E-17}}
+
+trait Encode[A, Format] = { encode: A -> Format }
+trait Convert[A, B] = { convert: A -> B }
+
+type Employee = { employeeId: String }
+type Json = { object: { employeeId: String } }
+type Yaml = { mapping: { employeeId: String } }
+type Xml = { element: { name: String, text: String } }
+
+implement Encode[Employee, Json] = {
+  encode = (employee: Employee) => { object = { employeeId = employee.employeeId } }
+}
+
+implement Encode[Employee, Yaml] = {
+  encode = (employee: Employee) => { mapping = { employeeId = employee.employeeId } }
+}
+
+implement Convert[Json, Xml] = {
+  convert = (document: Json) => {
+    element = { name = "employeeId", text = document.object.employeeId }
+  }
+}
+
+implement[A, B, C where Encode[A, B] and Convert[B, C]] Encode[A, C] = {
+  encode = (value: A) => {
+    let intermediate = Encode[A, B]::encode(value)
+    Convert[B, C]::convert(intermediate)
+  }
+}
+
+Encode[Employee, Xml]::encode({ employeeId = "E-17" })

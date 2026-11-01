@@ -163,6 +163,8 @@ final class Elaborator {
 
   private final case class ResolvedConstraint(name: String, tpe: Type)
 
+  private def instanceName(reference: TraitRef): String = s"imp_${reference.name}"
+
   private final case class ResolvedTypeParameters(parameters: Vector[String], constraints: Vector[ResolvedConstraint]) {
     def enter(scope: Scope): Scope = {
       val parameterScope = parameters.foldLeft(scope)((current, name) => current.bindType(name))
@@ -184,7 +186,7 @@ final class Elaborator {
       parameters.foldRight(constrained)((_, result) => NameHints.Parameter(None, result))
     }
 
-    /** Λᾱ.λ{d₁:D₁}.…λ{dₙ:Dₙ}.c : ∀ᾱ.D₁ ⇒ … ⇒ Dₙ ⇒ A. */
+    /** Λᾱ.λ⟨d₁:D₁⟩.…λ⟨dₙ:Dₙ⟩.c : ∀ᾱ.D₁ ⇒ … ⇒ Dₙ ⇒ A. */
     def abstractValue(value: NamedTerm): NamedTerm = {
       val constrained = constraints.foldRight(value.expression) { (constraint, body) =>
         ImplicitTerm.ImplicitLam(constraint.tpe, body, Some(constraint.name))
@@ -221,7 +223,7 @@ final class Elaborator {
       _ <- checkDistinctNames(typeParameters.names)
       parameterScope = typeParameters.names.foldLeft(scope)((current, name) => current.bindType(name))
       constraints <- Result.traverse(typeParameters.constraints) { reference =>
-        resolveTrait(reference, parameterScope).map(ResolvedConstraint(reference.name, _))
+        resolveTrait(reference, parameterScope).map(ResolvedConstraint(instanceName(reference), _))
       }
     } yield ResolvedTypeParameters(typeParameters.names, constraints)
   }
@@ -297,7 +299,7 @@ final class Elaborator {
         val expression = space match {
           case Space.Ordinary => ImplicitTerm.Let(value.tpe, value.expression, result.expression, Some(name))
           case Space.Instance => {
-            ImplicitTerm.Impl(value.tpe, value.expression, result.expression, hint)
+            ImplicitTerm.InstanceLet(value.tpe, value.expression, result.expression, hint)
           }
         }
         NamedTerm(expression, result.tpe, result.hints)
@@ -318,7 +320,7 @@ final class Elaborator {
       }
       case Declaration.Implement(typeParameters, target, value) :: rest => {
         elaborateEvidence(typeParameters, value, scope)(resolveTrait(target, _))
-          .flatMap(bind("@implementation", _, Space.Instance, rest, Some(target.name)))
+          .flatMap(bind("@implementation", _, Space.Instance, rest, Some(instanceName(target))))
       }
       case Declaration.Instance(name, typeParameters, annotation, value) :: rest => {
         elaborateEvidence(typeParameters, value, scope)(resolveType(annotation, _))
@@ -381,7 +383,7 @@ final class Elaborator {
       /*
        * Γ; Δ, d:A ⊢ e:B ⇝ c
        * ───────────────────────────────── E-Implicit-Lambda
-       * Γ; Δ ⊢ λ{d:A}.e : A ⇒ B ⇝ λ{d:A}.c
+       * Γ; Δ ⊢ λ⟨d:A⟩.e : A ⇒ B ⇝ λ⟨d:A⟩.c
        */
       case SurfaceExpr.ImplicitLam(name, annotation, body) => {
         for {
@@ -466,8 +468,8 @@ final class Elaborator {
       }
       /*
        * Γ; Δ ⊢ e₁:A ⇝ c₁    Γ; Δ,d:A ⊢ e₂:B ⇝ c₂
-       * ─────────────────────────────────────────────── E-Impl
-       * Γ; Δ ⊢ impl d:A = e₁ in e₂:B ⇝ impl d:A = c₁ in c₂
+       * ─────────────────────────────────────────────────────── E-Instance-Let
+       * Γ; Δ ⊢ instance d:A = e₁ in e₂:B ⇝ instance d:A = c₁ in c₂
        */
       case SurfaceExpr.Given(name, annotation, value, body) => {
         for {
@@ -475,7 +477,9 @@ final class Elaborator {
           checked <- elaborate(value, scope, Some(declared))
           result <- elaborate(body, scope.bind(name, checked.tpe, Space.Instance, checked.hints), expected)
         } yield NamedTerm(
-          ImplicitTerm.Impl(checked.tpe, checked.expression, result.expression, Some(name)), result.tpe, result.hints
+          ImplicitTerm.InstanceLet(checked.tpe, checked.expression, result.expression, Some(name)),
+          result.tpe,
+          result.hints
         )
       }
       case SurfaceExpr.Need(annotation) => {

@@ -9,6 +9,9 @@ describe('mathematical term presentation', () => {
       ['(x: Int) => (x + 1) * 2', 'λ(x: Int). (x + 1) * 2'],
       ['(f: Int -> Int) => f(1 + 2)', 'λ(f: Int → Int). f (1 + 2)'],
       ['(r: { x: Int }) => r.x + 1', 'λ(r: {x: Int}). r.x + 1'],
+      ['(implicit d: { value: Int }) => d.value', 'λ⟨d: {value: Int}⟩. d.value'],
+      ['(f: { value: Int } ~> Int) => f(using { value = 21 })', 'λ(f: {value: Int} ⇒ Int). f⟨{value = 21}⟩'],
+      ['(f: Int -> (Int ~> Int)) => f(1, using 2)', 'λ(f: Int → Int ⇒ Int). (f 1)⟨2⟩'],
       ['(f: (Int -> Int) -> Int) => f(x => x)', 'λ(f: (Int → Int) → Int). f (λ(x: Int). x)'],
     ]) {
       const analysis = analyze(source);
@@ -26,6 +29,7 @@ transform({ first = 20, second = 40 })`).unresolvedTerm!;
     const retained = structuredClone(document);
     const wide = termText(document, 120);
     const narrow = termText(document, 40);
+    expect(wide).toMatch(/^instance seed: Int = 1/);
     expect(narrow.split('\n').length).toBeGreaterThan(wide.split('\n').length);
     expect(narrow.split('\n').every((line) => line.length <= 40)).toBe(true);
     expect(narrow.replace(/\s+/g, '')).toBe(wide.replace(/\s+/g, ''));
@@ -60,7 +64,7 @@ transform({ first = 20, second = 40 })`).unresolvedTerm!;
     const document = analyze(`def apply[A](implicit default: A)(f: A -> A): A = f(default)
 apply`).unresolvedTerm!;
     const printed = termText(document, 60);
-    expect(printed).toContain('ΛA. λ{default: A}. λ(f: A → A).');
+    expect(printed).toContain('ΛA. λ⟨default: A⟩. λ(f: A → A).');
     expect(printed).toContain('f default\nin\napply');
     const shadowed = analyze('(x: Int) => (x: Int) => (y: Int) => x - y').unresolvedTerm!;
     expect(termText(shadowed)).toBe('λ(x: Int). λ(x1: Int). λ(y: Int). x1 - y');

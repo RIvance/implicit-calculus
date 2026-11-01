@@ -135,7 +135,7 @@ object ImplicitPrinter {
   ): Document = {
     val precedence = value match {
       case ImplicitTerm.Lam(_, _, _) | ImplicitTerm.ImplicitLam(_, _, _) | ImplicitTerm.TypeLam(_, _) |
-          ImplicitTerm.Let(_, _, _, _) | ImplicitTerm.Impl(_, _, _, _) | ImplicitTerm.Fix(_, _, _) => 0
+          ImplicitTerm.Let(_, _, _, _) | ImplicitTerm.InstanceLet(_, _, _, _) | ImplicitTerm.Fix(_, _, _) => 0
       case ImplicitTerm.BinOp(kind, _, _) => operatorPrecedence(kind)
       case ImplicitTerm.App(_, _) => 5
       case ImplicitTerm.ImplicitApp(_, _) | ImplicitTerm.TypeApp(_, _) | ImplicitTerm.Proj(_, _) => 6
@@ -156,7 +156,7 @@ object ImplicitPrinter {
         }
         case ImplicitTerm.ImplicitLam(annotation, body, nameHint) => {
           val nested = names.bindInstance(nameHint)
-          bind(text(s"λ{${nested.instances.head}: ") ++ typeDocument(annotation, names) ++ text("}."), body, nested)
+          bind(text(s"λ⟨${nested.instances.head}: ") ++ typeDocument(annotation, names) ++ text("⟩."), body, nested)
         }
         case ImplicitTerm.TypeLam(body, nameHint) => {
           val nested = names.bindType(nameHint)
@@ -196,8 +196,8 @@ object ImplicitPrinter {
         (head ++ (line ++ separated(arguments, line)).nested).grouped
       }
       case ImplicitTerm.ImplicitApp(function, argument) => {
-        (child(function, TermChild.Function, 6) ++ text("{") ++
-          (softline ++ child(argument, TermChild.Argument)).nested ++ softline ++ text("}")).grouped
+        (child(function, TermChild.Function, 6) ++ text("⟨") ++
+          (softline ++ child(argument, TermChild.Argument)).nested ++ softline ++ text("⟩")).grouped
       }
       case ImplicitTerm.TypeApp(function, argument) => {
         (child(function, TermChild.Function, 6) ++ text("[") ++
@@ -207,9 +207,9 @@ object ImplicitPrinter {
         val nested = names.bindOrdinary(nameHint)
         binding("let", nested.ordinary.head, nested, annotation, value, body, nameHint)
       }
-      case ImplicitTerm.Impl(annotation, value, body, nameHint) => {
+      case ImplicitTerm.InstanceLet(annotation, value, body, nameHint) => {
         val nested = names.bindInstance(nameHint)
-        binding("impl", nested.instances.head, nested, annotation, value, body, nameHint)
+        binding("instance", nested.instances.head, nested, annotation, value, body, nameHint)
       }
       case ImplicitTerm.Fix(annotation, body, nameHint) => {
         val nested = names.bindOrdinary(nameHint)

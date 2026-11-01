@@ -17,7 +17,7 @@ enum ImplicitTerm {
   case TypeApp(function: ImplicitTerm, argument: Type)
   case Let(valueType: Type, value: ImplicitTerm, body: ImplicitTerm, nameHint: Option[String] = None)
   case Fix(valueType: Type, body: ImplicitTerm, nameHint: Option[String] = None)
-  case Impl(valueType: Type, value: ImplicitTerm, body: ImplicitTerm, nameHint: Option[String] = None)
+  case InstanceLet(valueType: Type, value: ImplicitTerm, body: ImplicitTerm, nameHint: Option[String] = None)
   case Need(goal: Type, nameHint: Option[String] = None)
   case IntLit(value: BigInt)
   case StringLit(value: String)

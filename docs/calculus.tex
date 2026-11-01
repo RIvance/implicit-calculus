@@ -6,11 +6,11 @@
 \usepackage{booktabs,listings,fancyhdr,xcolor,array}
 \usepackage{tikz}
 \usepackage[hidelinks]{hyperref}
+\hypersetup{pdftitle={SMT Synthesis of Implicit Implementations}}
 \definecolor{ink}{HTML}{263849}
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small SMT Synthesis of Implicit Implementations}
-\fancyhead[R]{\small Formal specification}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
 \setlength{\parindent}{0pt}
@@ -28,11 +28,12 @@
 \newcommand{\Pj}[2]{\Gamma;\Delta\vdash_{\mathrm{ev}} #1:#2}
 \newcommand{\need}[1]{\mathsf{need}[#1]}
 \newcommand{\hole}[1]{?_{#1}}
-\newcommand{\ilam}[3]{\lambda\{#1:#2\}.\,#3}
+\newcommand{\iarg}[1]{\langle#1\rangle}
+\newcommand{\ilam}[3]{\lambda\langle#1:#2\rangle.\,#3}
 \newcommand{\lam}[3]{\lambda(#1:#2).\,#3}
 \newcommand{\fix}[3]{\mathsf{fix}\;#1:#2.\,#3}
 \newcommand{\letin}[3]{\mathsf{let}\;#1=#2\;\mathsf{in}\;#3}
-\newcommand{\impl}[4]{\mathsf{impl}\;#1:#2=#3\;\mathsf{in}\;#4}
+\newcommand{\instancelet}[4]{\mathsf{instance}\;#1:#2=#3\;\mathsf{in}\;#4}
 \newcommand{\argop}[1]{\operatorname{arg}(#1)}
 \newcommand{\resop}[1]{\operatorname{res}(#1)}
 \newcommand{\erase}[1]{\lvert #1\rvert}
@@ -41,16 +42,741 @@
 \newcommand{\fields}[1]{\{#1\}}
 \newcommand{\traittype}[1]{[\![#1]\!]}
 \begin{document}
+\thispagestyle{plain}
 {\Large\bfseries\color{ink} SMT Synthesis of Implicit Implementations}\par
-{\small Calculus and formal specification \hfill 31 October 2026}
+{\small\hfill 31 October 2026}
 
-The central problem is to construct typed evidence by choosing type arguments and composing
-available implementations. Section~\ref{sec:smt} develops a bounded SMT formulation and examines
-where ordinary resolution suffices, where choices become NP-hard, and why unrestricted search
-cannot always terminate. The calculus specifies admissible constructions and how their
-evidence enters a program.
+\section{Background}
+\label{sec:background}
+Comparing two lists requires a way to compare their elements. A library can provide
+the traversal over the lists, but the equality operation depends on the element
+type: integers, strings, and user-defined records need different implementations.
+Haskell's type classes make requirements such as equality part of a function's
+type, so the compiler can supply the required operations at a call~\cite{wadler-blott,haskell-classes}.
+Scala context parameters, Rust traits, and Lean instance arguments offer related
+ways to use operations whose implementations are selected from type information.
+The common task is to assemble the implementation that a program leaves implicit.
 
-\section{Types, expressions, and contexts}
+\subsection{How a call acquires an implementation}
+In Haskell, the type class \texttt{Eq} provides the equality operation
+\texttt{==}. The constraint \texttt{Eq a =>} says that a caller must make an
+equality implementation available for the argument type \texttt{a}:
+\begin{lstlisting}
+same :: Eq a => a -> a -> Bool
+same x y = x == y
+
+example = same ([1, 2] :: [Int]) [1, 2]
+\end{lstlisting}
+The annotation \texttt{[Int]} denotes a list of integers. The call to \texttt{same}
+therefore needs equality for integer lists. Haskell provides list equality whenever
+equality is available for the elements: the compiler combines that list instance
+with integer equality, and \texttt{example} evaluates to \texttt{True}.
+No equality implementation appears among the written arguments~\cite{haskell-classes}.
+
+For lists of integer lists, the compiler applies the same construction twice before
+reaching integer equality. Thus implicit argument insertion can involve composing
+several implementations. In this example, the argument type tells the compiler
+which dependency to request at every step.
+
+\subsection{Choosing among valid implementations}
+Sorting exposes a second issue. A user interface may need alphabetical order in
+one view and shortest names first in another. Both orders compare strings, yet
+the choice changes the result.
+
+In Scala, an \texttt{Ordering[String]} value provides a comparison operation for
+strings. The keyword \texttt{given} makes a named value available for automatic
+argument insertion. The following module supplies two orderings in the same scope:
+\begin{lstlisting}
+object SortOrders:
+  given alphabetical: Ordering[String] = Ordering.String
+  given shortestFirst: Ordering[String] =
+    Ordering.by((name: String) => name.length)
+  val names = List("Zoe", "Alex")
+  val result = names.sorted
+\end{lstlisting}
+\texttt{Ordering.String} compares strings alphabetically;
+\texttt{Ordering.by} compares the lengths computed by the displayed function.
+The call \texttt{names.sorted} omits its ordering argument. Scala can find both
+orderings, but its selection rules prefer neither, so the call is rejected.
+The programmer can choose explicitly with
+\texttt{names.sorted(using shortestFirst)}, obtaining \texttt{List("Zoe", "Alex")};
+choosing \texttt{alphabetical} instead gives \texttt{List("Alex", "Zoe")}~\cite{scala-resolution}.
+
+Our synthesizer accepts one typed construction without checking uniqueness.
+For exact type matches, the nearest lexical binding wins before SMT is called.
+For composition or type instantiation, the solver may select any satisfying
+construction in its current query; the lexical preference does not govern
+dependencies inside that construction.
+
+This is a known limitation: accepted constructions may behave differently.
+Type correctness does not establish \emph{coherence}, meaning that all permitted
+elaborations have the same behavior~\cite{cochis}.
+Section~\ref{sec:ambiguity} develops candidate ambiguity checks and deterministic
+selection rules.
+
+\newpage
+\subsection{Choosing an intermediate representation}
+Serialization adds a difficulty that the list examples avoid: the requested
+operation may leave an intermediate type unspecified. Suppose an application must
+send employee records to an integration that accepts XML. Its libraries provide
+JSON and YAML encoders for employees, and a converter from the JSON document
+schema to the required XML schema:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Available encoder & Converter for the result & Complete route to XML\\
+\midrule
+Employee to JSON document & JSON document to XML & Yes\\
+Employee to YAML document & No YAML-to-XML converter & No\\
+\bottomrule
+\end{tabular}
+\end{center}
+The JSON encoder and converter together solve the task. Selecting an employee
+encoder in isolation is insufficient: choosing YAML leaves a conversion that
+the library cannot supply.
+
+A Rust programmer might try to express this composition once for every source
+type. A Rust \texttt{trait} declares operations, and an \texttt{impl} supplies
+those operations for a type. Below, \texttt{Encode<Format>} encodes a source value
+into a document format, and \texttt{Convert<Target>} converts a document into
+another format:
+\begin{lstlisting}
+trait Encode<Format> {
+    fn encode(self) -> Format;
+}
+trait Convert<Target> {
+    fn convert(self) -> Target;
+}
+
+impl<Source, Intermediate, Target> Encode<Target> for Source
+where
+    Source: Encode<Intermediate>,
+    Intermediate: Convert<Target>,
+{
+    fn encode(self) -> Target {
+        let document: Intermediate = self.encode();
+        document.convert()
+    }
+}
+\end{lstlisting}
+The \texttt{where} clause lists the two requirements for the implementation:
+the source value must be encodable as \texttt{Intermediate}, and that document
+must be convertible to \texttt{Target}. The method first encodes the source
+value, then converts the resulting document.
+
+For the employee request, \texttt{Source} is \texttt{Employee} and
+\texttt{Target} is \texttt{Xml}. The encoder requirement still allows
+\texttt{Intermediate} to be either \texttt{Json} or \texttt{Yaml}.
+Rust requires the library interface to identify the intermediate format. The
+declaration is rejected because \texttt{Encode<Xml>} for \texttt{Employee}
+leaves \texttt{Intermediate} open~\cite{rust-parameters}. Having only one complete
+route does not make the declaration acceptable: Rust does not treat that missing
+parameter as a request to search for an encoding pipeline.
+
+One way to supply the missing information is an \emph{associated type}: a type
+chosen by each implementation of a trait. A separate default-encoding trait could
+designate one intermediate format per source type. Alternatively, a wrapper type
+\texttt{Via<Employee, Json>} could carry an employee and the choice of JSON in its
+type. Both designs expose the intermediate format in the interface. We ask whether
+the compiler can instead choose a compatible encoder and converter together.
+
+\newpage
+\subsection{When instance selection may infer a type}
+Lean illustrates how a language can permit instance selection to determine some
+types while requiring other types in advance. Consider a library operation that
+returns the first element of a container. For a list of natural numbers, the
+element type is clear to the programmer. The compiler must also know whether
+instance selection is allowed to discover that type.
+
+A Lean \texttt{class} declares a record of operations, and an \texttt{instance}
+supplies such a record. Here \texttt{HeadOf Container Element} requires an operation
+that returns an optional element; \texttt{Option} accounts for an empty container.
+The list instance supplies Lean's existing \texttt{List.head?} operation.
+In \texttt{peek}, braces bind type arguments to be inferred, and square brackets
+request an implementation to be supplied by instance search:
+\begin{lstlisting}
+class HeadOf (Container Element : Type) where
+  head? : Container -> Option Element
+
+instance {Element : Type} : HeadOf (List Element) Element where
+  head? := List.head?
+
+def peek {Container Element : Type} [HeadOf Container Element]
+    (xs : Container) : Option Element :=
+  HeadOf.head? xs
+
+def inferred := peek ([1, 2] : List Nat)
+def annotated : Option Nat := peek ([1, 2] : List Nat)
+\end{lstlisting}
+\texttt{Nat} is the type of natural numbers. In the definition of
+\texttt{inferred}, the argument fixes \texttt{Container} to \texttt{List Nat},
+but the call provides no expected type for \texttt{Element}. The list instance
+could reveal that the element type is \texttt{Nat}. However, ordinary class
+parameters are inputs to Lean's instance search: the compiler waits for both
+\texttt{Container} and \texttt{Element} to be known before selecting an instance.
+Consequently, Lean cannot complete this definition.
+
+The annotation \texttt{Option Nat} in \texttt{annotated} supplies the missing
+element type, allowing the compiler to choose the list instance. The call returns
+\texttt{some 1}, an optional result containing the number 1. Declaring the class parameter as
+\texttt{(Element : outParam Type)} tells Lean that instance selection may determine
+\texttt{Element}. With that declaration, the first call also succeeds.
+The distinction is the direction in which information may flow: from known types
+to an instance, or from a selected instance to a previously unknown
+type~\cite{lean-synthesis}.
+
+\subsection{From implicit arguments to synthesis}
+These examples identify the search problem. List equality composes implementations
+whose dependency types are already known. The employee encoder must also choose an
+intermediate type, and every stage of the encoding pipeline must agree on that
+choice. The Lean example shows that a language's rules for inferring missing types
+determine whether such a search can even begin. The Scala example shows why a
+successful typed construction still needs a policy governing competing choices.
+
+Recursive composition also raises a termination question. A list-equality request
+eventually reaches the element type, but a user-defined rule can instead generate
+ever larger requirements. GHC restricts instance declarations to ensure decreasing
+requirements by default; when those restrictions are relaxed, a depth limit
+bounds recursive resolution~\cite{ghc-termination}.
+
+We study the construction problem with explicit bounds on the search: can the
+available implementations be composed into a term of the requested type, including
+the intermediate type choices needed by the composition? The SMT formulation in
+Section~\ref{sec:introduction} represents implementation choices and type choices
+together, so requirements from different stages constrain the same solution.
+Section~\ref{sec:existing-languages} compares the language policies in more detail.
+
+\newpage
+\section{Introduction}
+\label{sec:introduction}
+An implicit argument asks the compiler to supply a program of a specified type.
+An application may need an XML encoder for employee records while its libraries
+provide employee encoders for JSON and YAML. A JSON-to-XML converter supplies the
+missing step, provided the compiler chooses JSON as the intermediate format.
+The caller should be able to request \texttt{Encode[Employee, Xml]} directly.
+
+Figure~\ref{fig:employee-encoding} views available implementations as edges between
+types. An encoder edge followed by a compatible converter edge supplies an encoder
+between the endpoints. The intermediate node must be both an encoder's output and
+a converter's input; JSON meets both requirements, whereas YAML has no onward edge.
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,>=stealth,
+  typ/.style={draw=ink,rounded corners=2pt,inner sep=5pt},
+  chosen/.style={->,draw=ink,very thick},
+  available/.style={->,draw=ink!55}
+]
+\node[typ] (employee) at (0,0) {$\kw{Employee}$};
+\node[typ,fill=ink!10] (json) at (3.5,0) {$\kw{Json}$};
+\node[typ] (yaml) at (3.5,-1.15) {$\kw{Yaml}$};
+\node[typ] (xml) at (7,0) {$\kw{Xml}$};
+\draw[chosen] (employee) -- node[above] {\small Encode} (json);
+\draw[chosen] (json) -- node[above] {\small Convert} (xml);
+\draw[available] (employee) -- node[below left] {\small Encode} (yaml);
+\node[right] at (4.2,-1.15) {\small no YAML-to-XML converter};
+\draw[->,dashed,draw=ink] (employee.north)
+  .. controls (0,1.5) and (7,1.5) ..
+  node[above] {\small requested Encode[Employee, Xml]} (xml.north);
+\end{tikzpicture}
+\caption{The solid edges are available implementations; the dashed edge is the
+request. The bold path supplies the requested encoder through JSON.}
+\label{fig:employee-encoding}
+\end{figure}
+
+\textbf{An XML encoder assembled from existing components.}
+The following mock uses structured document values for a single-field schema.
+\texttt{Encode[A, Format]} provides an encoder for a source type and output format;
+\texttt{Convert[A, B]} adapts one document format to another.
+\begin{lstlisting}
+trait Encode[A, Format] = { encode: A -> Format }
+trait Convert[A, B] = { convert: A -> B }
+
+type Employee = { employeeId: String }
+type Json = { object: { employeeId: String } }
+type Yaml = { mapping: { employeeId: String } }
+type Xml = { element: { name: String, text: String } }
+
+implement Encode[Employee, Json] = {
+  encode = (employee: Employee) => { object = { employeeId = employee.employeeId } }
+}
+
+implement Encode[Employee, Yaml] = {
+  encode = (employee: Employee) => { mapping = { employeeId = employee.employeeId } }
+}
+
+implement Convert[Json, Xml] = {
+  convert = (document: Json) => {
+    element = { name = "employeeId", text = document.object.employeeId }
+  }
+}
+
+implement[A, B, C where Encode[A, B] and Convert[B, C]] Encode[A, C] = {
+  encode = (value: A) => {
+    let intermediate = Encode[A, B]::encode(value)
+    Convert[B, C]::convert(intermediate)
+  }
+}
+
+Encode[Employee, Xml]::encode({ employeeId = "E-17" })
+\end{lstlisting}
+The composition implementation defines the two-edge construction in the figure.
+The last expression asks the compiler to choose those components. Its result
+is an XML document value representing
+\begin{center}
+\texttt{<employeeId>E-17</employeeId>}.
+\end{center}
+
+\newpage
+\subsection{Solving the choices together}
+Expand the two traits to dictionary types:
+\[
+ \kw{Encode}[A,B]=\{\kw{encode}:A\to B\},\qquad
+ \kw{Convert}[B,C]=\{\kw{convert}:B\to C\}.
+\]
+Name the four available implementations
+\[
+\begin{gathered}
+ e_0:\kw{Encode}[\kw{Employee},\kw{Yaml}],\qquad
+ e_1:\kw{Encode}[\kw{Employee},\kw{Json}],\\
+ c:\kw{Convert}[\kw{Json},\kw{Xml}],\\
+ i:\forall A,B,C.\ \kw{Encode}[A,B]\Rightarrow\kw{Convert}[B,C]
+                   \Rightarrow\kw{Encode}[A,C].
+\end{gathered}
+\]
+Here $\to$ takes an ordinary argument, $\Rightarrow$ takes implicit evidence,
+$p[T]$ instantiates a type parameter, and $p\iarg{q}$ supplies evidence.
+Matching the result of $i$ against the request fixes the endpoints:
+\[
+ \kw{Encode}[A,C]=\kw{Encode}[\kw{Employee},\kw{Xml}]
+ \quad\Longrightarrow\quad A=\kw{Employee},\ C=\kw{Xml}.
+\]
+The intermediate format $B$ remains open. Its two requirements must be solved together:
+\[
+ \boxed{\exists B,e,c'.\quad
+   e:\kw{Encode}[\kw{Employee},B]\ \land\ c':\kw{Convert}[B,\kw{Xml}].}
+\]
+For one application of $i$, let $j\in\{0,1\}$ select the employee encoder,
+and let $B$ be a symbolic type. Using the three base dictionaries gives the
+SMT constraints
+\[
+\begin{aligned}
+ \varphi_{\mathrm{encode}}(j,B)
+   &=(j=0\land B=\kw{Yaml})\ \lor\ (j=1\land B=\kw{Json}),\\
+ \varphi_{\mathrm{convert}}(B)&=(B=\kw{Json}),\\
+ \varphi(j,B)&=\varphi_{\mathrm{encode}}(j,B)\land
+               \varphi_{\mathrm{convert}}(B).
+\end{aligned}
+\]
+A satisfying assignment and its decoded program are
+\[
+\begin{gathered}
+ \boxed{j=1,\quad B=\kw{Json}}\\[4pt]
+ \boxed{i[\kw{Employee}][\kw{Json}][\kw{Xml}]\iarg{e_1}\iarg{c}
+        :\kw{Encode}[\kw{Employee},\kw{Xml}].}
+\end{gathered}
+\]
+The shared $B$ connects the prerequisites: choosing YAML cannot satisfy the
+converter constraint. This finite example is also solvable by graph search.
+The SMT formulation extends the same joint treatment to multiple producers,
+shared unknown types, and choices of evidence supplying each argument.
+
+The general search space contains exactly three construction forms:
+\[
+ p::=d\mid p[A]\mid p\iarg{p},
+\]
+where $d$ names an available implementation. Ordinary function application is
+performed by the program using the chosen dictionaries. For example, synthesis
+constructs the encoder dictionary above; its \texttt{encode} field later encodes
+the actual employee as JSON and converts that document to XML.
+
+\textbf{Where existing policies intervene.}
+A direct translation of this producer violates GHC's default instance-termination
+conditions and Rust's requirement that implementation parameters be constrained:
+$B$ occurs only in prerequisites~\cite{ghc-termination,rust-impl}.
+Lean's ordinary input mode suspends a request such as
+$\kw{Encode}[\kw{Employee},?B]$ until $B$ is known; output modes and default instances
+change that behavior~\cite{lean-synthesis}.
+Section~\ref{sec:existing-languages} makes these distinctions precise, including
+the roles of backtracking and ambiguity policies.
+
+\newpage
+\subsection{The question and its boundaries}
+Let $\Gamma$ contain the in-scope type variables and ordinary bindings,
+$\Delta$ the available implementations, and $G$ the requested type.
+Writing $\Gamma;\Delta\vdash_{\mathrm{ev}}p:G$ for admissible typed evidence,
+the unbounded question is
+\[
+ \exists p.\ \Gamma;\Delta\vdash_{\mathrm{ev}}p:G.
+\]
+We study a bounded version: $\mathcal W_{N,H}$ is the set of well-typed evidence
+programs for this request with construction cost at most $N$ and type-argument
+height at most $H$. Section~\ref{sec:bounded-programs} defines the cost on shared
+application spines. Our encoding provides the correspondence
+\[
+ \boxed{\mathcal W_{N,H}\ne\varnothing
+ \quad\Longleftrightarrow\quad
+ \exists n\in\{1,\ldots,N\}.\ \Phi_n^\star\text{ is satisfiable}.}
+\]
+Here $\Phi_n^\star$ encodes an $n$-spine construction together with its typing,
+scope, and bound constraints. A model becomes evidence only after decoding and
+independent checking. Section~\ref{sec:refinement} proves the correspondence and
+shows how validity constraints can be introduced by model refinement.
+
+The bounds are motivated by three different computational regimes:
+\begin{center}
+\begin{tabular}{@{}
+ >{\raggedright\arraybackslash}p{0.50\linewidth}
+ >{\raggedright\arraybackslash}p{0.42\linewidth}@{}}
+\toprule
+Available information & Resolution boundary\\
+\midrule
+Each result match fixes its prerequisite types, and reachable goals lie in
+a polynomial-size finite set
+ & Polynomial closure (Section~\ref{sec:polynomial-resolution})\\[5pt]
+Prerequisites share type parameters left open by the result
+ & NP-hard already for choices between two atomic types
+   (Section~\ref{sec:synthesis-hardness})\\[5pt]
+Producers can generate arbitrarily deep types and evidence
+ & Unbounded existence is undecidable
+   (Section~\ref{sec:unbounded-undecidability})\\
+\bottomrule
+\end{tabular}
+\end{center}
+Bounding the construction and its type arguments gives a decidable existence problem;
+solver interruption
+or an \textsf{unknown} response still establishes neither existence nor absence.
+SMT supplies a way to express and solve the joint constraints. Backtracking can
+also solve the employee encoding example; the mathematical comparison concerns which
+choices and termination guarantees each method supports.
+
+Section~\ref{sec:calculus} defines admissible evidence;
+Section~\ref{sec:smt} develops the SMT query and a worked model;
+Section~\ref{sec:refinement} establishes correctness; and
+Section~\ref{sec:complexity} studies polynomial, decidable, and unrestricted search.
+Appendix~\ref{sec:surface-language} specifies the surface language and elaboration;
+Appendix~\ref{sec:execution} gives lowering, independent target typing, and evaluation.
+
+\newpage
+\section{Inference and evidence selection in existing languages}
+\label{sec:existing-languages}
+Use $C(\overline A)$ for a class or trait obligation. Two different problems arise
+when a programmer omits arguments:
+\[
+\begin{array}{c|c|c}
+ \text{application after inserting unknowns} & \text{constraint} & \text{task}\\ \hline
+ \kw{id}[?A]\;3
+   & ?A=\Int & \text{infer a type argument}\\[3pt]
+ \kw{display}[?A]\iarg{?d}\;3
+   & ?A=\Int,\quad ?d:\TS[\Int] & \text{infer the type and construct evidence}
+\end{array}
+\]
+Here $\kw{id}:\forall A.A\to A$ and
+$\kw{display}:\forall A.\TS[A]\Rightarrow A\to\Str$.
+The first equation determines an omitted type. The second still leaves an evidence
+term to find. Lean and Rocq expose ordinary implicit arguments and typeclass search
+as separate elaboration mechanisms~\cite{lean-functions,rocq-implicit}.
+
+For a comparison with hidden type arguments, return to the encoder from
+Section~\ref{sec:introduction}:
+\[
+\begin{gathered}
+ i:\forall A,B,C.\ \kw{Encode}[A,B]\Rightarrow\kw{Convert}[B,C]
+                    \Rightarrow\kw{Encode}[A,C],\\
+ G=\kw{Encode}[\kw{Employee},\kw{Xml}].
+\end{gathered}
+\]
+After fixing $A=\kw{Employee}$ and $C=\kw{Xml}$, the underlying evidence question is
+\[
+ \boxed{\exists B,e,c.\quad
+ \Pj e{\kw{Encode}[\kw{Employee},B]}\ \land\ \Pj c{\kw{Convert}[B,\kw{Xml}]}.}
+\]
+The issue is how each language constrains, infers, or searches for $B$.
+
+\subsection{Head matching and determined outputs}
+\textbf{Haskell: instance heads, termination conditions, and functional dependencies.}
+An instance declares a result, called its \emph{head}, together with prerequisites,
+called its \emph{context}.
+GHC selects instances by matching their heads against the wanted constraint.
+Under the ordinary non-overlapping policy, the match must be unique; prerequisite
+contexts do not disambiguate matching heads~\cite{ghc-termination}.
+For an instance $P_1,\ldots,P_k\Longrightarrow Q$, the default Paterson conditions
+include
+\[
+ \operatorname{occ}_\alpha(P_i)\le\operatorname{occ}_\alpha(Q),\qquad
+ |P_i|<|Q|,\qquad
+ P_i\text{ contains no type-family application}.
+\]
+Here $|P|$ counts type constructors and variables in the class arguments,
+and $\operatorname{occ}_\alpha(P)$ counts occurrences of $\alpha$.
+A type family computes a type from type arguments; evaluating a type-family
+application can expand a prerequisite beyond its written size.
+The encoder composition rule fails the first condition for $B$:
+\[
+ \operatorname{occ}_B(\kw{Encode}[A,B])=1
+ \quad>\quad \operatorname{occ}_B(\kw{Encode}[A,C])=0.
+\]
+The \texttt{UndecidableInstances} extension relaxes the declaration restrictions;
+GHC then retains a reduction-depth limit~\cite{ghc-termination}.
+
+A functional dependency $A\mapsto B$ on $\kw{Encode}$ would instead require
+\[
+ \kw{Encode}[A,B_1]\land\kw{Encode}[A,B_2]\Longrightarrow B_1=B_2.
+\]
+Such dependencies can determine parameters absent from a requested
+result~\cite{ghc-dependencies}, but this particular law permits only one output
+format per source type. It excludes simultaneous JSON, YAML, and XML encoders
+for employees. A separate relation $\kw{DefaultEncode}[A,B]$ can designate a
+single default format while $\kw{Encode}[A,C]$ retains multiple outputs:
+\[
+\begin{gathered}
+ \kw{DefaultEncode}[A,B_1]\land\kw{DefaultEncode}[A,B_2]\Longrightarrow B_1=B_2,\\
+ \kw{DefaultEncode}[A,B]\land\kw{Convert}[B,C]\Longrightarrow\kw{Encode}[A,C].
+\end{gathered}
+\]
+The default fixes the intermediate format in advance. This changes the interface
+and the choice problem: a different supported encoding is not tried when the
+default format lacks a converter.
+
+\textbf{Rust: constrained implementation parameters and associated types.}
+Rust requires an implementation's type parameters to be constrained by its
+implementing type, trait arguments, or qualifying associated-type equalities.
+A direct translation of the encoder rule leaves $B$ only in prerequisite bounds,
+so violates this requirement~\cite{rust-impl}.
+An associated type on the default-encoding trait instead expresses
+\[
+\begin{gathered}
+ B=\operatorname{Format}_{\kw{DefaultEncode}}(A),\\
+ \kw{DefaultEncode}(A)\land\kw{Convert}[B,C]\Longrightarrow\kw{Encode}[A,C].
+\end{gathered}
+\]
+The intermediate format is an output of the selected default encoder.
+Rust also rejects overlapping ordinary trait implementations and restricts
+where implementations may be declared: the declaring package must define the
+trait or a participating type, subject to the parameter restrictions known as
+the \emph{orphan rules}~\cite{rust-impl}.
+These coherence rules do not establish unrestricted termination: recursive trait
+requirements can reach the solver's recursion limit~\cite{rust-resolution-limits}.
+
+\subsection{Composition and ambiguity}
+\textbf{Scala 3: recursive construction with a preference policy.}
+Given instances and conditional givens supply values and producers whose context
+parameters induce further searches~\cite{scala-givens}.
+Scala 3 selects among eligible candidates using scope and specificity. Ambiguity
+in a recursive prerequisite propagates to the enclosing search; a divergent branch
+is treated as failure so that other alternatives can still be tried~\cite{scala-resolution}.
+
+Take distinct types $P,G$, with $a_0,a_1$ equally preferred in the same scope:
+\[
+ \Delta=[a_0:P,\ a_1:P,\ f:P\Rightarrow G].
+\]
+Then the evidence relation and the resolution policy answer different questions:
+\[
+\begin{array}{c|c}
+ \text{existence of typed evidence} & \text{Scala-style disambiguation}\\ \hline
+ f\iarg{a_0}:G,\quad f\iarg{a_1}:G
+   & \mathsf{search}(P)=\mathsf{ambiguous}\\
+ \exists p.\ \Pj p G
+   & \mathsf{search}(G)=\mathsf{ambiguous}
+\end{array}
+\]
+Thus existence alone is insufficient for a successful implicit call.
+Our bounded synthesizer accepts either composite witness; the Scala policy also
+asks whether its candidate preferences select one.
+
+\textbf{OCaml: explicit modules and the modular implicits proposal.}
+The standard OCaml module mechanism passes implementations explicitly through
+functors or first-class modules~\cite{ocaml-modules}.
+A module groups types and operations. A functor takes modules as arguments and
+produces a module; a first-class module packages a module as a value.
+For the encoding example, a caller can choose an encoder module $E$ and a
+converter module $V$, subject to type-sharing equations:
+\[
+ F(E)(V),\qquad E.\kw{input}=\kw{Employee},\qquad
+ E.\kw{output}=V.\kw{input},\qquad V.\kw{output}=\kw{Xml}.
+\]
+Module checking verifies this composition; the module arguments identify which
+implementations the caller selected.
+
+The modular implicits proposal adds automatic selection of implicit modules and
+applications of implicit functors~\cite{modular-implicits}. A typical recursive
+construction has the shape
+\[
+ \kw{PrintList}(\kw{PrintList}(\kw{PrintInt}))
+ \quad:\quad \TS[\kw{List}(\kw{List}(\Int))].
+\]
+Its scope admits multiple implementations, but resolution requires a unique solution.
+For repeated applications of the same implicit functor, the proposal checks
+decreasing constraints; here the payloads decrease as
+\[
+ \kw{List}(\kw{List}(\Int))
+ \ \leadsto\ \kw{List}(\Int)
+ \ \leadsto\ \Int.
+\]
+Failure of that termination check is an error: an unexplored branch could conceal
+a second solution, so finding one successful branch would not establish
+uniqueness~\cite{modular-implicits}.
+
+This gives a concrete contrast between search contracts:
+\[
+\begin{array}{c|c|c}
+ & \text{one finite solution found} & \text{another branch diverges}\\ \hline
+ \text{bounded existence} & \text{sufficient for success} & \text{outside the bounds is irrelevant}\\
+ \text{modular implicits} & \text{uniqueness still required} & \text{termination error}\\
+ \text{Scala 3} & \text{candidate preferences still apply} & \text{try other alternatives}
+\end{array}
+\]
+The modular implicits row describes the proposed extension, separately from
+OCaml's standard explicit module passing.
+
+\newpage
+\subsection{Proof search and argument modes}
+\textbf{Lean 4: input modes, output parameters, and tabled resolution.}
+Lean uses ordinary implicit arguments for unification and instance-implicit
+arguments for typeclass synthesis~\cite{lean-functions}.
+For ordinary instances, unknown input parameters suspend search. Marking a parameter
+\texttt{outParam} permits synthesis to determine it; \texttt{semiOutParam} also
+permits an unknown output but uses a known value during matching~\cite{lean-synthesis}.
+For the encoder relation, the distinction is
+\[
+\begin{array}{c|c}
+ \text{parameter modes} & \text{request with unknown }B\\ \hline
+ \kw{Encode}_{\mathrm{in,in}}[\kw{Employee},?B]
+   & \text{stuck until }B\text{ becomes known}\\[3pt]
+ \kw{Encode}_{\mathrm{in,out}}[\kw{Employee},?B]
+   & \text{may return }B=T,\quad e:\kw{Encode}[\kw{Employee},T]
+\end{array}
+\]
+Default instances provide an additional fallback that can instantiate input
+parameters. Priorities and declaration order affect candidate selection;
+an output annotation permits inference, rather than imposing Haskell's
+functional-dependency law~\cite{lean-synthesis}.
+
+Lean's tabled resolution records search problems and their answers, addressing
+repeated work in diamonds and repeated visits to cycles~\cite{tabled-resolution}.
+These are distinct from generating infinitely many different goals:
+\[
+ \underbrace{D(T)\leadsto D(T)}_{\text{a repeated goal}}
+ \qquad\qquad
+ \underbrace{D(T)\leadsto D(S(T))\leadsto D(S(S(T)))\leadsto\cdots}_{\text{different goals}},
+\]
+where $S(T)=\{\kw{succ}:T\}$ and $D(T)=\{\kw{combine}:T\to T\to T\}$.
+Lean also limits synthesized instance size and search work~\cite{lean-synthesis}.
+Tabling addresses the first phenomenon; it does not turn the unrestricted problem
+of Section~\ref{sec:unbounded-undecidability} into a decidable one.
+
+\textbf{Rocq (Coq): unification, typeclass proof search, and canonical structures.}
+Ordinary implicit arguments are inferred from other arguments and their types
+or from the expected context~\cite{rocq-implicit}.
+Typeclass resolution uses \texttt{typeclasses eauto}, registered hints, and
+unification. It can instantiate existential variables and backtrack; modes can
+instead require inputs to be known. Depth-first search is the default, with
+configurable breadth-first search and depth limits~\cite{rocq-typeclasses}.
+
+Consequently, the hidden-type problem can be explored as a proof-search tree.
+Write a state as $(\mathcal G;\sigma)$, with pending goals $\mathcal G$ and
+substitution $\sigma$:
+\[
+ \mathcal S_0=(\kw{Encode}[\kw{Employee},B],\kw{Convert}[B,\kw{Xml}];\varnothing).
+\]
+\[
+\begin{aligned}
+ \mathcal S_0&\xrightarrow{e_0}
+   (\kw{Convert}[\kw{Yaml},\kw{Xml}];[B\mapsto\kw{Yaml}])
+   \ \longrightarrow\ \mathsf{failure}\\
+ \mathcal S_0&\xrightarrow{e_1}
+   (\kw{Convert}[\kw{Json},\kw{Xml}];[B\mapsto\kw{Json}])
+   \ \xrightarrow{c}\ (\varnothing;[B\mapsto\kw{Json}]).
+\end{aligned}
+\]
+Backtracking restores $\mathcal S_0$, including the unsolved $B$, before trying $e_1$.
+This trace assumes modes permit solving $B$ and alternatives remain available.
+In particular, Rocq's optional \texttt{Unique Instances} setting commits to a
+solved class goal, while \texttt{Unique Solutions} asks the search to establish
+uniqueness. Such settings change the search contract~\cite{rocq-typeclasses}.
+
+Canonical structures provide another way to recover an omitted record from
+a projection equation. For a registered structure $D_{\Int}$ with
+$\operatorname{carrier}(D_{\Int})=\Int$,
+\[
+ \operatorname{carrier}(?D)=\Int
+ \quad\leadsto\quad ?D=D_{\Int}.
+\]
+The canonical-structure registry indexes this extension of a projection to a
+record; it is distinct from typeclass hint search~\cite{rocq-canonical}.
+
+\newpage
+\subsection{The comparison contract}
+The surveyed systems constrain different parts of the same inference problem:
+\begin{center}
+\begin{tabular}{@{}
+ >{\raggedright\arraybackslash}p{0.16\linewidth}
+ >{\raggedright\arraybackslash}p{0.39\linewidth}
+ >{\raggedright\arraybackslash}p{0.37\linewidth}@{}}
+\toprule
+System & How choices are controlled & How recursive search is controlled\\
+\midrule
+GHC
+  & Instance-head matching; overlap policy; functional dependencies
+  & Default declaration checks; reduction limit when relaxed\\[4pt]
+Rust
+  & Implementation constraints, associated types, coherence
+  & Trait-solving limits and overflow detection\\[4pt]
+Scala 3
+  & Scope and specificity; unresolved ambiguity is an error
+  & Divergence checks; alternative branches remain eligible\\[4pt]
+OCaml modules
+  & Caller supplies module arguments
+  & Explicit composition is checked\\[4pt]
+Modular implicits
+  & A unique implicit module expression is required
+  & Repeated functor applications must decrease\\[4pt]
+Lean 4
+  & Input/output modes, priorities, and default instances
+  & Tabled search plus size and work limits\\[4pt]
+Rocq
+  & Unification, hints, modes, and optional commitment/uniqueness
+  & Configurable proof-search strategy and depth\\[4pt]
+This calculus
+  & Any admissible bounded witness; nearest exact match first
+  & Construction-cost and type-argument bounds\\
+\bottomrule
+\end{tabular}
+\end{center}
+The concrete examples above motivate three separate comparison questions:
+\begin{center}
+\begin{tabular}{@{}
+ >{\raggedright\arraybackslash}p{0.30\linewidth}
+ >{\raggedright\arraybackslash}p{0.34\linewidth}
+ >{\raggedright\arraybackslash}p{0.28\linewidth}@{}}
+\toprule
+Family & Property being tested & Relevant comparison\\
+\midrule
+Finite dependency diamonds/cycles
+  & Reuse and termination & Closure or tabled resolution\\[4pt]
+Hidden parameters and shared clauses
+  & Consistent choices across prerequisites & Unification with backtracking\\[4pt]
+Multiple successful implementations
+  & Which witness is acceptable & Ambiguity and preference policies\\
+\bottomrule
+\end{tabular}
+\end{center}
+The first two concern finding evidence; the third concerns the meaning of accepting
+one witness among alternatives. For example, if two printing dictionaries return
+different strings, both can satisfy the same type while producing observably
+different results.
+
+Our formal claim is the bounded existence equivalence of Section~\ref{sec:refinement}.
+A performance comparison should give SMT and a specialized search the same evidence
+grammar, type equality, bounds, and witness-selection requirement. Lean's tabled
+resolution and Rocq's backtracking make composition and hidden-argument inference
+existing capabilities to compare against. The empirical question is how effectively
+SMT propagates shared constraints and excludes inconsistent combinations.
+
+\newpage
+\section{Evidence calculus}
+\label{sec:calculus}
+\subsection{Types and contexts}
 \[
 \begin{array}{rcl}
 A,B,P,Q&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid A\to B\mid A\Rightarrow B
@@ -63,57 +789,8 @@ $\Gamma$ binds type variables and ordinary values; $\Delta$ binds available impl
 values, nearest first. $P,Q$ are ordinary types, not a distinct predicate sort.
 Records are finite maps with distinct labels; field order is immaterial. Equality is structural, modulo
 $\alpha$-equivalence and lexical type-synonym expansion. There is no subtyping.
-
-\textbf{Expression notation for the typing rules} (with resolved annotation types):
-\[
-\begin{array}{rcl}
-e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}\mid\lambda x.e
- \mid e(e)\mid e\{e\}\\
-&&\mid\Lambda\alpha.e\mid e[A]\mid\letin{x}{e}{e}\mid\impl{d}{A}{e}{e}\mid\fix{x}{A}{e}\\
-&&\mid\{\ell_j=e_j\}_{j\in J}\mid e.\ell\mid(e:A)\mid\need A
- \mid e_1\mathbin{\odot}e_2
-\end{array}
-\]
-The surface program has separate declarations and expressions, as specified in
-Section~\ref{sec:syntax}. Elaborating its declarations expands type and trait names
-and constructs a single unresolved term. The notation above describes the common
-binding and typing operations used in that translation.
-The syntax $e.\ell$ is an unclassified selection with an arbitrary term receiver. Elaboration determines
-whether a selection becomes a core projection or a method applied to its receiver.
-Both $x$ and $d$ are parsed as names; lexical name resolution distinguishes their binders.
 In rules, bound names are globally fresh by $\alpha$-renaming. This convention preserves
 ordinary source shadowing without conflating the two environments.
-
-\textbf{Implicit terms}:
-\[
-\begin{array}{rcl}
-c&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{c}\mid\ilam{d}{A}{c}
- \mid c\,c\mid c\{c\}\\
-&&\mid\Lambda\alpha.c\mid c[A]\mid\letin{x:A}{c}{c}\mid\impl{d}{A}{c}{c}\mid\fix{x}{A}{c}\\
-&&\mid\{\ell_j=c_j\}_{j\in J}\mid c.\ell\mid\hole A
- \mid c_1\mathbin{\odot}c_2
-\end{array}
-\]
-Implicit terms contain no aliases, traits, definitions, modules, or method-resolution operation.
-$\hole A$ is a deferred request, not a runtime term.
-
-\textbf{Primitive binary operators}:
-\[
-\begin{array}{c|c|c}
-\odot & \argop\odot & \resop\odot\\\hline
-+,-,\times & \Int & \Int\\
-\mathsf{==},<,> & \Int & \Bool\\
-\mathbin{+\!+} & \Str & \Str
-\end{array}
-\]
-\[
-\begin{aligned}
-\delta_+(m,n)&=m+n, &\delta_-(m,n)&=m-n, &\delta_\times(m,n)&=mn,\\
-\delta_{==}(m,n)&=(m=n),&\delta_<(m,n)&=(m<n),&\delta_>(m,n)&=(m>n),\\
-\delta_{++}(s,t)&=st.&&&&
-\end{aligned}
-\]
-Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
 
 \textbf{Type formation} (contexts are assumed well formed):
 \begin{mathpar}
@@ -132,538 +809,12 @@ Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
  {\wf{\{\ell_j:A_j\}_{j\in J}}}
 \end{mathpar}
 
-\newpage
-\section{Practical syntax and the first AST}
-\label{sec:syntax}
-Parsing produces a program consisting of top-level declarations followed by one
-final expression. The declaration forms are \texttt{type}, \texttt{trait},
-\texttt{implement}, \texttt{instance}, and \texttt{def}:
-\[
-\begin{aligned}
- \Pi&=(\bar D,\hat e),\\
- D&::=\kw{type}\ C[\bar a]=\hat A
-       \mid\kw{trait}\ C[\bar a]=\hat A\\
-  &\quad\mid\kw{implement}\ H\,\pi=\hat e
-       \mid\kw{instance}\ d\,H:\hat A=\hat e\\
-  &\quad\mid\kw{def}\ f\,H(\bar p):\hat A=\hat e.
-\end{aligned}
-\]
-Here $H$ is an optional type parameter clause, $\pi$ a trait reference, and
-$\bar p$ a parameter list. Instance parameter lists are expanded as described below.
-Write $\hat e$ for a parsed surface expression and $\hat A$ for a named surface type.
-Expressions include ordinary let bindings and local evidence bindings, each with a body:
-\[
-\begin{aligned}
-\texttt{let x = e in b}&\longmapsto\letin{x}{\hat e}{\hat b},\\
-\texttt{let x: A = e in b}&\longmapsto\letin{x}{(\hat e:\hat A)}{\hat b},\\
-\texttt{given d: A = e in b}&\longmapsto\impl{d}{\hat A}{\hat e}{\hat b}.
-\end{aligned}
-\]
-A \texttt{given} requires its annotation; an ordinary let may synthesize the initializer's
-type. Neither binder is in scope in its own initializer. Braces and parentheses only
-group expressions. Declarations precede the final expression and cannot occur inside it.
-Elaboration consumes the declarations and produces one implicit term; type and trait
-declarations leave no runtime node.
-
-\subsection*{Types and expression forms}
-\begin{center}
-\renewcommand{\arraystretch}{1.18}
-\begin{tabular}{@{}ll@{}}
-\toprule
-Source type & Named abstract type\\
-\midrule
-\texttt{Int}, \texttt{String}, \texttt{Bool} & $\Int,\ \Str,\ \Bool$\\
-$C$, $C[A_1,\ldots,A_n]$ & $C$, $C[\hat A_1,\ldots,\hat A_n]$\\
-\texttt{A -> B} & $\hat A\to\hat B$\\
-\texttt{A \textasciitilde{}> B} & $\hat A\Rightarrow\hat B$\\
-$\texttt{forall }a_1,\ldots,a_n\texttt{. }B$ & $\forall a_1.\cdots\forall a_n.\hat B$\\
-$\{\ell_1:A_1,\ldots,\ell_n:A_n\}$ & $\{\ell_1:\hat A_1,\ldots,\ell_n:\hat A_n\}$\\
-$(A)$ & $\hat A$\\
-\bottomrule
-\end{tabular}
-\end{center}
-Both arrows associate to the right. A type name is retained as written; elaboration
-determines whether it denotes a bound type variable or a lexical synonym. A trait name
-is rejected in every ordinary type position, including annotations, type arguments,
-\texttt{summon}, and explicitly written implicit parameters.
-
-Names and literals translate to $x$, $n$, $b$, and $s$; string escapes are decoded.
-The remaining nonbinding forms translate as follows:
-\begin{center}
-\renewcommand{\arraystretch}{1.18}
-\begin{tabular}{@{}ll@{}}
-\toprule
-Source expression & Named abstract expression\\
-\midrule
-$\{\ell_1=e_1,\ldots,\ell_n=e_n\}$ & $\{\ell_1=\hat e_1,\ldots,\ell_n=\hat e_n\}$\\
-\texttt{e: A} & $(\hat e:\hat A)$\\
-\texttt{summon[A]} & $\need{\hat A}$\\
-\texttt{e.field} & $\hat e.\mathit{field}$\\
-\texttt{P::field} & $\hat P\mathbin{::}\mathit{field}$\\
-\texttt{f(a)}, \texttt{f a} & $\hat f(\hat a)$\\
-\texttt{f(using a)} & $\hat f\{\hat a\}$\\
-\texttt{f[A]} & $\hat f[\hat A]$\\
-$e_1\mathbin{\odot}e_2$ & $\hat e_1\mathbin{\odot}\hat e_2$\\
-\texttt{(e)}, \texttt{\{ e \}} & $\hat e$\\
-\bottomrule
-\end{tabular}
-\end{center}
-Field assignments distinguish a record literal from a brace group; \texttt{\{\}} is
-the empty record. Duplicate labels are rejected before fields become a finite map.
-A grouped expression can contain nested let and given expressions.
-Consequently, \texttt{f \{ e \}} translates to the ordinary application $\hat f(\hat e)$.
-Binary operators use the primitive operations specified in Section~1.
-
-\subsection*{Binders and application lists}
-A lambda parameter group contains one or more comma-separated entries
-\texttt{x}, \texttt{x: A}, or \texttt{implicit d: P}. Ordinary lambda annotations are optional;
-implicit parameters require annotations. Declaration parameters in \texttt{def} and
-\texttt{instance} require annotations. Concatenate repeated groups in source order
-to obtain $\bar p=[p_1,\ldots,p_n]$. Each entry wraps an abstract body $E$:
-\[
-\begin{aligned}
-\mathcal L_x(E)&=\lambda x.E,\\
-\mathcal L_{x:A}(E)&=\lam{x}{\hat A}{E},\\
-\mathcal L_{\texttt{implicit }d:P}(E)&=\ilam{d}{\hat P}{E},\\
-\mathcal L_{\bar p}(E)&=
- \mathcal L_{p_1}(\mathcal L_{p_2}(\cdots\mathcal L_{p_n}(E)\cdots)).
-\end{aligned}
-\]
-A lambda \texttt{(}$\bar p$\texttt{) => e} translates to $\mathcal L_{\bar p}(\hat e)$.
-A single unannotated parameter also admits \texttt{x => e}, producing $\lambda x.\hat e$.
-Comma-separated parameters and repeated groups therefore produce the same nested binders,
-with the first parameter outermost. For example:
-\[
-\texttt{(a: A, implicit b: B, c: C) => e}
- \quad\longmapsto\quad
- \lam{a}{\hat A}{\ilam{b}{\hat B}{\lam{c}{\hat C}{\hat e}}}.
-\]
-Type lambdas \texttt{[}$a_1,\ldots,a_n$\texttt{] => e} translate to
-$\Lambda a_1.\cdots\Lambda a_n.\hat e$.
-
-Argument lists instead accumulate applications from left to right. Each \texttt{using}
-marks just its own argument; type-argument lists likewise produce successive type applications:
-\[
-\begin{aligned}
-\texttt{f(a, using b, c)}&\longmapsto ((\hat f(\hat a))\{\hat b\})(\hat c),\\
-\texttt{f[A, B]}&\longmapsto(\hat f[\hat A])[\hat B].
-\end{aligned}
-\]
-Automatic insertion of missing implicit arguments belongs to elaboration of ordinary
-application; the parser preserves the applications actually written.
-
-\subsection*{Declarations, programs, and type parameters}
-A file is a declaration sequence followed by a final expression:
-\[
- \texttt{d}_1\texttt{;}\cdots\texttt{;}\texttt{d}_n\texttt{;}\texttt{e}
- \quad\longmapsto\quad ([\hat d_1,\ldots,\hat d_n],\hat e).
-\]
-Here \texttt{;} stands for \texttt{in}, a semicolon, or a newline. The same separators
-join a let or given initializer to its body.
-
-A \texttt{type C[}$\bar a$\texttt{] = A} declaration introduces an ordinary alias;
-\texttt{trait C[}$\bar a$\texttt{] = A} introduces a trait whose definition must
-expand to a record type. Both are sequential and nonrecursive. Parameters are distinct
-and the definition expands earlier aliases at declaration time. Its instantiated body
-is obtained by capture-avoiding substitution for those parameters. The frontend records
-the declaration kind, while the resulting calculus types are structural.
-
-Write $\pi=C[A_1,\ldots,A_m]$ for a trait reference and $\Sigma$ for the sequential
-declaration environment. The expansion $\traittype{\pi}_\Sigma=D$ is defined only
-when $C$ names a trait, the arity matches, and every $A_i$ is an ordinary type.
-$D$ is the dictionary's record type. Trait references occur in \texttt{where},
-\texttt{implement} targets, and qualified member access. Explicit dictionary values
-use ordinary record types or aliases.
-
-A type parameter clause has the form
-\[
- H=\texttt{[}a_1,\ldots,a_n\ \texttt{where }\pi_1\ \texttt{and}\ \cdots
- \ \texttt{and}\ \pi_k\texttt{]}.
-\]
-The type parameter list may be empty. The optional \texttt{where} clause, when present,
-contains one or more trait references separated by \texttt{and}. Type parameter clauses
-belong to \texttt{def}, \texttt{implement}, and \texttt{instance} declarations.
-After binding the type parameters, elaboration resolves $D_j=\traittype{\pi_j}_\Sigma$
-and uses these abstraction operations:
-\[
-\begin{aligned}
-\mathcal G_H(c)
- &=\Lambda a_1.\cdots\Lambda a_n.
-   \ilam{d_1}{D_1}{\cdots\ilam{d_k}{D_k}{c}},\\
-\mathcal Q_H(T)
- &=\forall a_1.\cdots\forall a_n.
-   D_1\Rightarrow\cdots\Rightarrow D_k\Rightarrow T.
-\end{aligned}
-\]
-The $d_j$ are fresh source-inaccessible binders. An omitted clause makes both
-operations the identity.
-
-The two evidence declarations are
-\begin{lstlisting}
-implement[A where C[A]] D[A] = expression
-instance name[A where C[A]](parameters): R = expression
-\end{lstlisting}
-Type parameter clauses are optional; instance value parameters are also optional.
-The first form requires a trait target and is anonymous. The second requires a name
-and accepts any ordinary type. Both are top-level and nonrecursive.
-
-Instance value parameters use the same curried binders as lambdas. Their annotations
-also construct a function type, with each implicit parameter choosing $\Rightarrow$:
-\[
-\begin{aligned}
-\mathcal F_{x:A}(T)&=\hat A\to T,&
-\mathcal F_{\texttt{implicit }d:P}(T)&=\hat P\Rightarrow T,\\
-\mathcal F_{\bar p}(T)&=\mathcal F_{p_1}(\cdots\mathcal F_{p_n}(T)\cdots).
-\end{aligned}
-\]
-Thus \texttt{instance d}$H$\texttt{(}$\bar p$\texttt{): R = e} becomes the declaration
-$\kw{instance}\ d\,H:\mathcal F_{\bar p}(\hat R)=\mathcal L_{\bar p}(\hat e)$.
-With no value parameters, these operations are the identity.
-
-If $T$ is an implementation's expanded trait type or an instance's resolved annotation,
-the initializer is checked against $T$ under the clause's type and constraint binders.
-Let $c$ be that checked initializer and $b$ the elaboration of the remaining program.
-Both evidence declarations produce
-\[
- \impl{d}{\mathcal Q_H(T)}{\mathcal G_H(c)}{b}.
-\]
-The new evidence binding is available only in $b$. Its name is supplied by
-\texttt{instance} or generated for \texttt{implement}. A local \texttt{given d: A = e in b}
-instead checks $e$ against its ordinary annotation directly, then elaborates $b$ with
-$d:A$ in $\Delta$. A polymorphic local value uses an explicit universal annotation and
-type abstraction, for example \texttt{given id: forall A. A -> A = [A] => x => x in body}.
-Type and trait declarations update $\Sigma$ and contribute no term binding.
-
-\subsection*{Definitions and recursion}
-A definition retains its name, type parameters, value parameters, result annotation, and body:
-\begin{lstlisting}
-def f[A where C[A]](parameters): R = body
-\end{lstlisting}
-The type parameter clause and value parameter groups are optional; the result annotation is required.
-Let $V$ be the body abstracted over the written parameters and type parameter clause, and $T$ its
-full declared type, including those arrows and quantifiers. The generated \texttt{where}
-parameters precede the written parameters. A definition with no self-reference produces
-$\letin{f:T}{V}{b}$. Otherwise the body is checked with $f:T$ in $\Gamma$ and produces
-\[
- \letin{f:T}{\fix{f}{T}{V}}{b}.
-\]
-A self-reference is a free term occurrence of $f$ in the abstracted body: parameter,
-lambda, let, and given shadowing are respected. A local binding does not bind its
-own initializer. Field labels and type names are not term references. Declarations
-are sequential; the self binding does not enable mutual or forward recursion.
-
-The surface restriction on recursive definitions is
-\[
-\begin{aligned}
- \operatorname{function}(A\to B)&=\mathsf{true},&
- \operatorname{function}(A\Rightarrow B)&=\mathsf{true},\\
- \operatorname{function}(\forall\alpha.A)&=\operatorname{function}(A),&
- \operatorname{function}(A)&=\mathsf{false}\quad\text{otherwise}.
-\end{aligned}
-\]
-Elaboration requires $\operatorname{function}(T)$ only when inserting a fixpoint.
-Thus \texttt{def x: Int = x} and a self-referencing record definition are rejected,
-while nonrecursive values of those types are allowed. The calculus's fixpoint has
-no function-type restriction. Neither the core nor the surface function check
-promises termination.
-
-For example, a nonrecursive definition
-\begin{lstlisting}
-def display[A where ToString[A]](x: A): String = x.toString
-rest
-\end{lstlisting}
-remains a definition declaration followed by the expression \texttt{rest} in the
-surface program. If $D_A=\{\kw{toString}:A\to\Str\}$, elaboration produces
-\[
- \letin{\kw{display}:\forall A.D_A\Rightarrow A\to\Str}
- {\Lambda A.\ilam{d}{D_A}{\lam{x}{A}{(\hole{D_A}).\kw{toString}\;x}}}
- {c_{\kw{rest}}}.
-\]
-This is one term: the trait and definition declarations have been consumed by elaboration.
-
-\subsection*{Grouping and the elaboration boundary}
-Precedence, from tightest to loosest, is adjacent postfix operations, application,
-\texttt{*}, \texttt{+}/\texttt{-}, \texttt{++}, comparisons, and ascription.
-Applications and binary operators associate to the left. Adjacency determines the argument
-tree: \texttt{f g(x)} parses as \texttt{f(g(x))}, while \texttt{f g (x)} parses as
-\texttt{f(g)(x)}. A negative argument is parenthesized, as in \texttt{f(-1)};
-\texttt{f - 1} is subtraction.
-
-A newline after a complete expression ends its application, selection, ascription, and
-operator chain, allowing it to separate a declaration initializer from its continuation.
-Line breaks are allowed where a component is still required, such as after \texttt{=}
-or \texttt{=>}. Record fields require commas, semicolons, or newlines, with an optional
-trailing separator. Comments are whitespace; newlines inside them also act as boundaries.
-
-The program records declaration order; expression binders record lexical nesting. Elaboration resolves term
-names against ordinary and implementation binders, resolves type names against type
-variables and synonyms, validates trait references, and checks annotations. It classifies each selection $e.\ell$
-using the receiver's type: an existing record field becomes a projection; otherwise the
-method rule may introduce an implementation request and apply its selected member to
-the receiver. For \texttt{P::field}, elaboration first resolves $P$ as a trait reference
-or ordinary type, obtaining a dictionary type $D$, then elaborates $(\need D).\mathit{field}$.
-Types and traits remain separate from term receivers:
-\texttt{ToString[A].toString} fails elaboration when \texttt{ToString} names only a trait.
-Evidence resolution later supplies implementations for the resulting requests.
-
-\newpage
-\subsection*{Worked translations}
-The following complete programs illustrate how declaration elaboration and expression translation compose. Symbols such as
-$v$ and $e_{\mathrm{body}}$ abbreviate subexpressions of the displayed mathematical tree.
-Generated binders are fresh and source-inaccessible.
-
-\textbf{1. Type abstractions with mixed parameters and arguments.}
-\begin{lstlisting}
-trait Default[A] = { value: A }
-def choose[A where Default[A]](fallback: A, implicit preferred: A)(last: A): A = preferred
-implement Default[Int] = { value = 11 }
-choose[Int](0, using 21, 99)
-\end{lstlisting}
-The definition introduces its type parameter, its generated constraint parameter, and then
-its three written parameters, in that order. After validating and expanding the trait:
-\[
-\begin{aligned}
-v_{\kw{choose}}
- &=\Lambda A.\ilam{d}{\{\kw{value}:A\}}{
-   \lam{\kw{fallback}}{A}{
-   \ilam{\kw{preferred}}{A}{
-   \lam{\kw{last}}{A}{(\kw{preferred}:A)}}}},\\
-e
- &=\letin{\kw{choose}}{v_{\kw{choose}}}{
-   \impl{i}{\{\kw{value}:\Int\}}{\{\kw{value}=11\}}{((\kw{choose}[\Int](0))\{21\})(99)}}.
-\end{aligned}
-\]
-Only the argument $21$ is marked implicit in the parsed call. When elaboration reaches
-the first ordinary argument $0$, it inserts the request for the leading \texttt{where}
-constraint. The unresolved call is therefore
-\[
- ((\kw{choose}[\Int]\{\hole{\{\kw{value}:\Int\}}\})(0))\{21\}(99).
-\]
-Resolution supplies $\{\kw{value}=11\}$ for that request; $21$ is supplied directly to
-$\kw{preferred}$. The program returns $21$. Replacing the two parameter groups by
-\texttt{(fallback: A)(implicit preferred: A)(last: A)} gives the same abstract definition.
-
-\textbf{2. Typed bindings, brace groups, and local implementations.}
-\begin{lstlisting}
-type Box[A] = { value: A }
-let box: Box[Int] = {
-  let seed: Int = 20
-  given chosen: Int = seed + 1
-  { value = summon[Int] }
-}
-box.value
-\end{lstlisting}
-The initializer's outer braces group nested let and given expressions; the inner
-field assignment constructs a record. After annotations and the alias are resolved:
-\[
-\begin{aligned}
-e_{\mathrm{body}}
- &=\letin{\kw{seed}:\Int}{20}{
-   \impl{\kw{chosen}}{\Int}{\kw{seed}+1}{\{\kw{value}=\hole{\Int}\}}},\\
-e
- &=\letin{\kw{box}:\{\kw{value}:\Int\}}{e_{\mathrm{body}}}{\kw{box}.\kw{value}}.
-\end{aligned}
-\]
-The newline after the closing brace starts the continuation of \texttt{let box}.
-The implementation is available while constructing the record; its scope ends before
-$\kw{box}.\kw{value}$. The record retains the value $21$, which is the program's result.
-
-\newpage
-\section{Typing and elaboration: functions and bindings}
-\subsection*{Bidirectional judgments and name resolution}
-\[
-\boxed{\E e A c}\qquad\boxed{\EC e A c}
-\]
-The first judgment synthesizes $A$ from $e$; the second checks $e$ against an expected
-$A$. Both produce a fully annotated implicit term $c$. An unannotated lambda requires
-checking against an ordinary function type. Type annotations, application parameter types,
-definition signatures, and evidence declarations supply expected types. Checking propagates
-these types through nested lambdas, type abstractions, record fields, and binding bodies.
-Let initializers without annotations synthesize their types independently of later uses.
-No type is inferred backward from a lambda's body or from later calls.
-
-Resolution, target typing, and evaluation use the separate judgments
-\[
-\boxed{\R c t}\qquad\boxed{H\vdash t:T}\qquad\boxed{\eval\rho t v}.
-\]
-The implementation uses separate de Bruijn indices for $\Gamma$ and $\Delta$, and a
-type-variable depth. The final target has one term-index space.
-
-A nonrecursive synonym $C[\bar\alpha]=B$ expands $C[\bar A]$ to
-$B[\bar A/\bar\alpha]$ in its lexical body. Expansion is capture avoiding:
-the declaration's parameters bind only their own occurrences in $B$.
-Earlier aliases are expanded when the declaration is checked.
-$|\bar A|=|\bar\alpha|$ is required. Types and values resolve in separate namespaces.
-All annotation and expected types must be well formed. These judgments do not search
-for evidence; they insert deferred requests.
-
-\begin{mathpar}
-\inferrule*[right=E-Var]{x:A\in\Gamma}{\E x A x}
-
-\inferrule*[right=E-Instance]{d:A\in\Delta}{\E d A d}
-
-\inferrule*[right=E-Lambda]{\Gamma,x:A;\Delta\vdash e\Rightarrow B\rightsquigarrow c}
- {\E{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
-
-\inferrule*[right=Check-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
- {\EC{\lambda x.e}{A\to B}{\lam{x}{A}{c}}}
-
-\inferrule*[right=Check-Annotated-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
- {\EC{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
-
-\inferrule*[right=E-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Rightarrow B\rightsquigarrow c}
- {\E{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
-
-\inferrule*[right=Check-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Leftarrow B\rightsquigarrow c}
- {\EC{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
-
-\inferrule*[right=E-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Rightarrow A\rightsquigarrow c\\
- \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
- {\E{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
-
-\inferrule*[right=Check-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Leftarrow A\rightsquigarrow c\\
- \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
- {\EC{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
-\end{mathpar}
-
-\begin{mathpar}
-\inferrule*[right=E-Type-App]{\E e {\forall\alpha.A} c\\\wf B}
- {\E{e[B]}{A[B/\alpha]}{c[B]}}
-
-\inferrule*[right=E-Implicit-App]{\E{e_1}{A\Rightarrow B}{c_1}\\\EC{e_2}{A}{c_2}}
- {\E{e_1\{e_2\}}{B}{c_1\{c_2\}}}
-
-\inferrule*[right=E-App]{\E{e_1}{T}{c_1}\\c_1:T\triangleright c'_1:A\to B\\\EC{e_2}{A}{c_2}}
- {\E{e_1(e_2)}{B}{c'_1\,c_2}}
-
-\inferrule*[right=E-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
- {\E{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
-
-\inferrule*[right=Check-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
- {\EC{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
-
-\inferrule*[right=E-Impl]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
- {\E{\impl{d}{A}{e_1}{e_2}}{B}{\impl{d}{A}{c_1}{c_2}}}
-
-\inferrule*[right=Check-Impl]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
- {\EC{\impl{d}{A}{e_1}{e_2}}{B}{\impl{d}{A}{c_1}{c_2}}}
-
-\inferrule*[right=E-Fix]{\wf A\\\Gamma,x:A;\Delta\vdash e\Leftarrow A\rightsquigarrow c}
- {\E{\fix{x}{A}{e}}{A}{\fix{x}{A}{c}}}
-
-\inferrule*[right=E-Ascribe]{\EC e A c}{\E{(e:A)}{A}{c}}
-
-\inferrule*[right=E-Need]{\wf A}{\E{\need A}{A}{\hole A}}
-
-\inferrule*[right=Check-Infer]{\E e A c\\e\text{ is not a checking introduction}}
- {\EC e A c}
-\end{mathpar}
-The checking introductions are ordinary, implicit, and type lambdas, records, lets,
-and implementation bindings. They use their corresponding checking rules, including
-\textsc{Check-Record} below. Every supplied lambda annotation must equal the expected
-parameter type. Checking does not insert an ordinary, implicit, or type abstraction;
-the source determines the binder kind.
-
-\subsection*{Expose an ordinary application}
-\begin{mathpar}
-
-\inferrule*[right=Expose-Stop]{T\ne(P\Rightarrow Q)\text{ for every }P,Q}
- {c:T\triangleright c:T}
-
-\inferrule*[right=Expose-Step]{c\{\hole P\}:Q\triangleright c':T}
- {c:P\Rightarrow Q\triangleright c':T}
-\end{mathpar}
-Only ordinary application invokes this relation. In particular, returning an implicit
-function, referring to it by name, or passing it as an ordinary value does not force it.
-An implementation initializer is elaborated in the old $\Delta$: bindings are nonrecursive.
-
-\newpage
-\section{Typing and elaboration: records, primitives, and method syntax}
-\begin{mathpar}
-
-\inferrule*[right=E-Int]{n\in\mathbb Z}{\E n\Int n}
-
-\inferrule*[right=E-String]{s\text{ a string}}{\E s\Str s}
-
-\inferrule*[right=E-Bool]{b\in\{\mathsf{true},\mathsf{false}\}}{\E b\Bool b}
-
-
-\inferrule*[right=E-Record]{\E{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
- {\E{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
-
-\inferrule*[right=Check-Record]{\EC{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
- {\EC{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
-
-
-\inferrule*[right=E-Project]{\E e{\{\ell_j:A_j\}_{j\in J}}c\\ k\in J}
- {\E{e.\ell_k}{A_k}{c.\ell_k}}
-
-
-\inferrule*[right=E-BinOp]{\EC{e_1}{\argop\odot}{c_1}\\
- \EC{e_2}{\argop\odot}{c_2}}
- {\E{e_1\mathbin{\odot}e_2}{\resop\odot}{c_1\mathbin{\odot}c_2}}
-\end{mathpar}
-
-\subsection*{Receiver-style method selection}
-For a receiver type $A$ and label $\ell$, define the finite set of \emph{types}
-\[
-\mathcal M_{\Delta,A,\ell}
-=\bigl\{(P,B)\ \bigm|\ (d:P)\in\Delta,\;
- P=\{\ell_j:A_j\}_{j\in J},\;
- \exists k\in J.\;\ell_k=\ell\land A_k=A\to B\bigr\}.
-\]
-Repeated occurrences of the same pair contribute one set member.
-Let $\operatorname{labels}(A)$ be the field labels when $A$ is a record, and $\varnothing$ otherwise.
-\begin{mathpar}
-
-\inferrule*[right=E-Method]{\E e A c\\\ell\notin\operatorname{labels}(A)\\
- \mathcal M_{\Delta,A,\ell}=\{(P,B)\}}
- {\E{e.\ell}{B}{(\hole P).\ell\;c}}
-\end{mathpar}
-Zero candidates reject the selection; two distinct candidate types reject it as ambiguous.
-This rule determines the request type, not its implementation. Actual record projection
-has priority; records without the requested field can also use this rule.
-Explicit qualification $\need P.\ell(e)$, written \texttt{P::member(e)} in source syntax,
-avoids this receiver-syntax restriction.
-
-\subsection*{The running qualified function}
-With $\TS[A]=\{\kw{toString}:A\to\Str\}$, the source definition
-\begin{lstlisting}
-def display[A where ToString[A]](x: A): String = x.toString
-\end{lstlisting}
-has type and unresolved body
-\[
-\begin{aligned}
-\kw{display}&:\forall A.\TS[A]\Rightarrow A\to\Str,\\
-c_{\kw{display}}&=\Lambda A.\ilam{d}{\TS[A]}{
- \lam{x}{A}{(\hole{\TS[A]}).\kw{toString}\;x}}.
-\end{aligned}
-\]
-Under $(d:\TS[A])::\Delta$, evidence resolution may select $d$.
-After successful resolution:
-\[
- t_{\kw{display}}
- =\Lambda A.\lam{d}{\TS[A]}{\lam{x}{A}{d.\kw{toString}\;x}},
- \qquad
- t_{\kw{display}}:\forall A.\TS[A]\to A\to\Str.
-\]
-A concrete call first becomes
-$c_{\kw{display}}[\Str]\{\hole{\TS[\Str]}\}\;s$.
-The request is solved in the \emph{caller's} lexical environment, while requests in
-an ordinary function body are solved in that body's definition environment.
-
-\newpage
-\section{SMT-based implicit synthesis}
-\label{sec:smt}
-Given a well-formed goal type $A$ and available implementations $\Delta$, synthesis
-seeks a construction $p$ such that $\Pj p A$. The search must choose both the
-composition of implementations and the types at which polymorphic values are used.
-An SMT model records those choices; decoding turns them into evidence for the goal.
 
 \subsection{Admissible evidence}
-Evidence constructions are a restricted subset of implicit terms:
+Evidence constructions form the following fragment of the implicit terms defined
+in Appendix~\ref{sec:expression-notation}:
 \[
-\boxed{p::=d\mid p[A]\mid p\{p\}.}
+\boxed{p::=d\mid p[A]\mid p\iarg{p}.}
 \]
 The only leaves are references into $\Delta$. New literals, lambdas, projections,
 ordinary references from $\Gamma$, and unresolved requests are not synthesis results.
@@ -679,7 +830,7 @@ They may occur inside a previously checked first-class value installed in $\Delt
 
 
 \inferrule*[right=P-Implicit-App]{\Pj{p_1}{A\Rightarrow B}\\\Pj{p_2}A}
- {\Pj{p_1\{p_2\}}B}
+ {\Pj{p_1\iarg{p_2}}B}
 \end{mathpar}
 These rules \emph{check} a proposed construction. They do not prescribe a search strategy.
 A pluggable algorithm supplies a partial judgment
@@ -706,14 +857,22 @@ universal type, apply a producer, recurse, or search for a hidden type argument.
 Failure is not an uninhabitability result.
 
 \newpage
+\section{Bounded SMT synthesis}
+\label{sec:smt}
+Given a well-formed goal type $A$ and available implementations $\Delta$, synthesis
+seeks a construction $p$ such that $\Pj p A$. The search must choose both the
+composition of implementations and the types at which polymorphic values are used.
+An SMT model records those choices; decoding turns them into evidence for the goal.
+
 \subsection{Bounded evidence programs}
+\label{sec:bounded-programs}
 The default synthesizer first uses S-Exact. Otherwise it searches application
 \emph{spines}: a head reference followed by a sequence of eliminations. For bounds
 $N,H>0$, a candidate program is
 \[
 \begin{array}{rcl}
  z_i&=&d_{j_i}\,a_{i,1}\cdots a_{i,\ell_i}\qquad(0\le i\le r<N),\\
- a_{i,t}&::=&[B]\mid\{z_k\}\qquad(0\le k<i),\\
+ a_{i,t}&::=&[B]\mid\iarg{z_k}\qquad(0\le k<i),\\
  \displaystyle\sum_{i=0}^{r}(1+\ell_i)&\le&N.
 \end{array}
 \]
@@ -729,7 +888,7 @@ constraints, writing $U_k=T_{k,\ell_k}$ for a completed earlier spine:
 \begin{array}{c|l|l}
 a_{i,t}&\text{premises}&T_{i,t}\\ \hline
 [B]&T_{i,t-1}=\forall\alpha.C,\quad\wf B,\quad h(B)\le H&C[B/\alpha]\\
-\{z_k\}&T_{i,t-1}=U_k\Rightarrow C&C
+\iarg{z_k}&T_{i,t-1}=U_k\Rightarrow C&C
 \end{array}
 \]
 Here $h$ is constructor height: base types and variables have height one,
@@ -746,6 +905,7 @@ The default structural bounds are $N=16$ and $H=8$.
 They bound the search, not the evidence typing judgment.
 
 \subsection{Symbolic types and instantiation}
+\label{sec:symbolic-types}
 Types are algebraic datatypes in SMT. At this encoding boundary,
 each unordered field map is serialized in increasing label order, so datatype equality
 coincides with map equality; decoding reconstructs an unordered map. Existing type variables
@@ -829,7 +989,7 @@ $(h_i=c\land\ell_i=j)\Longrightarrow U_i=R$ with the displayed $j,R$:
  j&\text{corresponding construction}&R\\\hline
  0&c&\forall A.\,D(A)\Rightarrow D(T(A))\\
  1&c[B_i]&D(B_i)\Rightarrow D(T(B_i))\\
- 2&c[B_i]\{z_{k_i}\}&D(T(B_i))
+ 2&c[B_i]\iarg{z_{k_i}}&D(T(B_i))
 \end{array}
 \]
 These cases exhaust the possible eliminations: $d$ is a record, and the fully
@@ -865,6 +1025,7 @@ Both the construction and its type argument are unknown when this question is po
 
 \newpage
 \subsection{A satisfying model and its evidence}
+\label{sec:smt-model}
 One satisfying assignment to the used variables is
 \[
 \begin{array}{c|c|c|c|c|l}
@@ -881,7 +1042,7 @@ The implicit argument refers to $z_0:D(\Int)$, which precedes $z_1$. The cost is
 \]
 Decoding the model gives
 \[
- z_0=d,\qquad z_1=c[\Int]\{z_0\},\qquad \boxed{p=c[\Int]\{d\}.}
+ z_0=d,\qquad z_1=c[\Int]\iarg{z_0},\qquad \boxed{p=c[\Int]\iarg{d}.}
 \]
 Its typing derivation follows the two eliminations. With $\Gamma=\cdot$, write
 $\Delta\vdash_{\mathrm{ev}}$ for $\Gamma;\Delta\vdash_{\mathrm{ev}}$:
@@ -894,7 +1055,7 @@ $\Delta\vdash_{\mathrm{ev}}$ for $\Gamma;\Delta\vdash_{\mathrm{ev}}$:
 \inferrule*[right=P-Implicit-App]
  {\Delta\vdash_{\mathrm{ev}}c[\Int]:D(\Int)\Rightarrow D(T(\Int))\\
   \Delta\vdash_{\mathrm{ev}}d:D(\Int)}
- {\Delta\vdash_{\mathrm{ev}}c[\Int]\{d\}:D(T(\Int))}
+ {\Delta\vdash_{\mathrm{ev}}c[\Int]\iarg{d}:D(T(\Int))}
 \end{mathpar}
 The leaf judgments follow from P-Instance. Thus the model describes an admissible
 composition with exactly the requested type.
@@ -910,31 +1071,31 @@ two are sufficient.
 This illustrates the role of SMT: the goal equality constrains a type argument,
 the instantiated implicit arrow constrains the dictionary choice, and the reference
 inequality makes the evidence acyclic. If ordinary program variables $a,b:T(\Int)$
-hold server totals, the caller can use $(c[\Int]\{d\}).\kw{combine}\;a\;b$.
+hold server totals, the caller can use $(c[\Int]\iarg{d}).\kw{combine}\;a\;b$.
 Those ordinary applications consume the synthesized dictionary and the caller's data.
 
 \newpage
-\subsection{Model refinement and correctness}
+\section{Model refinement and correctness}
 \label{sec:refinement}
 Fix well-formed inputs $\Gamma,\Delta,G$, bounds $N,H>0$, and a spine count
 $1\le n\le N$. Write $\Delta=[d_j:A_j]_{0\le j<m}$.
 Let $L$ be the record labels in $\Delta,G$, and let $\langle A\rangle$ denote
-the scoped, canonical type encoding of Section~5.3.
+the scoped, canonical type encoding of Section~\ref{sec:symbolic-types}.
 
 \textbf{The complete bounded formula.}
 There are $n$ heads $j_i$, lengths $\ell_i$, and result types $U_i$.
 For each potential argument position $(i,t)$, the tagged argument is either
-$[b]$ (an encoded type) or $\{k\}$ (an earlier spine).
+$[b]$ (an encoded type) or $\iarg{k}$ (an earlier spine).
 The elimination relation is
 \[
 \begin{aligned}
  \mathcal E_i(T,[b],U)
    &\iff \exists C.\ T=\forall.C\ \land\ U=I_0(C,b),\\
- \mathcal E_i(T,\{k\},U)
+ \mathcal E_i(T,\iarg{k},U)
    &\iff 0\le k<i\ \land\ T=(U_k\Rightarrow U).
 \end{aligned}
 \]
-Using the intermediate types $T_{i,t}$ from Section~5.2, define
+Using the intermediate types $T_{i,t}$ from Section~\ref{sec:bounded-programs}, define
 \[
 \begin{aligned}
  \Phi_n^0\ \coloneqq\
@@ -961,7 +1122,7 @@ type arguments. Define their validity by
 The equality with $\langle B\rangle$ also requires the canonical record encoding.
 For the finite set of potential positions
 $J_n=\{(i,t)\mid0\le i<n,\ 1\le t<N\}$, put
-$b_{i,t}=b$ when $a_{i,t}=[b]$; its value is irrelevant when $a_{i,t}=\{k\}$.
+$b_{i,t}=b$ when $a_{i,t}=[b]$; its value is irrelevant when $a_{i,t}=\iarg{k}$.
 \[
 \begin{aligned}
  \chi_{i,t}&\coloneqq t\le\ell_i\ \land\ a_{i,t}=[b_{i,t}],\\
@@ -979,8 +1140,8 @@ Known constructors reduce $\mathcal E_i$ by equalities:
 \[
 \begin{aligned}
  \mathcal E_i(\forall.C,[b],U)&\iff U=I_0(C,b),&
- \mathcal E_i(\forall.C,\{k\},U)&\iff\bot,\\
- \mathcal E_i(P\Rightarrow Q,\{k\},U)
+ \mathcal E_i(\forall.C,\iarg{k},U)&\iff\bot,\\
+ \mathcal E_i(P\Rightarrow Q,\iarg{k},U)
    &\iff 0\le k<i\land U_k=P\land U=Q,&
  \mathcal E_i(P\Rightarrow Q,[b],U)&\iff\bot.
 \end{aligned}
@@ -1090,7 +1251,7 @@ Define every evidence prefix in increasing lexicographic order of $(i,t)$:
  p_{i,t}&=
  \begin{cases}
   p_{i,t-1}[B],&a_{i,t}=[\langle B\rangle],\\
-  p_{i,t-1}\{p_{k,\ell_k}\},&a_{i,t}=\{k\}.
+  p_{i,t-1}\iarg{p_{k,\ell_k}},&a_{i,t}=\iarg{k}.
  \end{cases}
 \end{aligned}
 \]
@@ -1110,9 +1271,9 @@ by the model:
  a_{i,t}=[\langle B\rangle]
    & A_{i,t-1}=\forall\alpha.C,\quad\wf B
    & \Pj{p_{i,t-1}[B]}{C[B/\alpha]}\\[4pt]
- a_{i,t}=\{k\}
+ a_{i,t}=\iarg{k}
    & A_{i,t-1}=P\Rightarrow Q,\quad A_{k,\ell_k}=P
-   & \Pj{p_{i,t-1}\{p_{k,\ell_k}\}}Q
+   & \Pj{p_{i,t-1}\iarg{p_{k,\ell_k}}}Q
 \end{array}
 \]
 Canonical encoding commutes with the scoped substitution $I_0$, so the type-application
@@ -1133,10 +1294,10 @@ At the resolver boundary, acceptance requires the two independent judgments
  \qquad\text{and}\qquad
  \erase\Gamma,\erase\Delta\vdash\erase p:\erase G,
 \]
-where $\erase\Gamma,\erase\Delta$ is the merged target context of Section~6.
+where $\erase\Gamma,\erase\Delta$ is the merged target context of Appendix~\ref{sec:lowering}.
 
 \textbf{Encoding and bounded completeness.}
-Let $\mathcal W_{n,N,H}$ be the well-typed $n$-spine programs of Section~5.2
+Let $\mathcal W_{n,N,H}$ be the well-typed $n$-spine programs of Section~\ref{sec:bounded-programs}
 with final type $G$, cost at most $N$, and type-argument heights at most $H$.
 Write $\mathcal W^L_{n,N,H}$ for those using only labels in $L$ in type arguments.
 For $\pi\in\mathcal W^L_{n,N,H}$, define an assignment $M_\pi$ by
@@ -1144,7 +1305,7 @@ For $\pi\in\mathcal W^L_{n,N,H}$, define an assignment $M_\pi$ by
 \begin{array}{c|c}
  \text{symbolic variable} & \text{value from }\pi\\ \hline
  j_i,\ell_i & \text{head index and argument count of spine }i\\
- a_{i,t} & [\langle B\rangle]\text{ or }\{k\}\text{ from its }t\text{-th argument}\\
+ a_{i,t} & [\langle B\rangle]\text{ or }\iarg{k}\text{ from its }t\text{-th argument}\\
  T_{i,t} & \langle A\rangle\text{ for the type }A\text{ of that prefix}\\
  U_i & T_{i,\ell_i}
 \end{array}
@@ -1238,6 +1399,14 @@ Outside these complete cases, bounded exhaustion, solver $\mathsf{unknown}$,
 and failure to execute a solver query carry no unbounded absence judgment.
 
 \newpage
+\section{Complexity and decidability}
+\label{sec:complexity}
+The bounded encoding answers an existence question. To locate its computational
+cost, first consider when prerequisite types can be computed from the goal,
+then allow shared unknown parameters, and finally remove the construction bounds.
+The resulting fragments separate polynomial closure, finite combinatorial search,
+and unbounded computation on types.
+
 \subsection{Polynomial resolution: computing dependencies from types}
 \label{sec:polynomial-resolution}
 We ask whether $\exists p.\ \Pj p G$, without a construction-cost limit.
@@ -1313,8 +1482,8 @@ $X$ and $Y$ remain unavailable.\\
 Their cycle has no seed.
 \end{minipage}
 \end{center}
-A witness is $h\{f\{d\}\}\{g\{d\}\}:G$. In round $2$, the partial application
-$h\{f\{d\}\}$ supplies the function of type $R\Rightarrow G$.
+A witness is $h\iarg{f\iarg{d}}\iarg{g\iarg{d}}:G$. In round $2$, the partial application
+$h\iarg{f\iarg{d}}$ supplies the function of type $R\Rightarrow G$.
 
 The general computation is the least closure
 \[
@@ -1385,8 +1554,8 @@ to construct dictionaries at those two types:
 A shared derivation makes the repeated prerequisite explicit:
 \[
  z_0=d,\qquad
- z_1=\kw{pair}[\Int][\Int]\{z_0\}\{z_0\},\qquad
- z_2=\kw{pair}[\Int][\kw{Pair}(\Int,\Int)]\{z_0\}\{z_1\}.
+ z_1=\kw{pair}[\Int][\Int]\iarg{z_0}\iarg{z_0},\qquad
+ z_2=\kw{pair}[\Int][\kw{Pair}(\Int,\Int)]\iarg{z_0}\iarg{z_1}.
 \]
 
 \textbf{Why this family is polynomial.}
@@ -1412,39 +1581,42 @@ controls both the number of goals and the substitutions that can connect them.
 \newpage
 \subsection{A parameter the goal leaves open}
 \label{sec:synthesis-hardness}
-Consider deriving a printer through a representation:
+Return to the employee encoder of Section~\ref{sec:introduction}:
+\[
+ i:\forall A,B,C.\ \kw{Encode}[A,B]\Rightarrow\kw{Convert}[B,C]
+                   \Rightarrow\kw{Encode}[A,C].
+\]
+The goal fixes the source and target, but leaves the intermediate format open:
 \[
 \begin{gathered}
- \kw{Repr}[A,B]=\{\kw{repr}:A\to B\},\qquad
- \TS[A]=\{\kw{toString}:A\to\Str\},\\
- i:\forall A,B.\ \kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A].
+ \underbrace{\kw{Encode}[A,C]=\kw{Encode}[\kw{Employee},\kw{Xml}]}_{\text{result matching}}\\
+ \Longrightarrow\quad A=\kw{Employee},\quad C=\kw{Xml},\qquad
+ \boxed{B\text{ remains free}.}
 \end{gathered}
 \]
-Let $\kw{Person}=\{\kw{name}:\Str\}$ and request $\TS[\kw{Person}]$. This time,
-\[
- \underbrace{\TS[A]=\TS[\kw{Person}]}_{\text{result matching}}
- \quad\Longrightarrow\quad A=\kw{Person},\qquad
- \boxed{B\text{ remains free}.}
-\]
 In the notation just defined,
-$\operatorname{Match}(i,\TS[\kw{Person}])
-=\{[A\mapsto\kw{Person},B\mapsto T]\mid T\text{ is a closed monotype}\}$.
+\[
+\begin{gathered}
+ \theta_T=[A\mapsto\kw{Employee},B\mapsto T,C\mapsto\kw{Xml}],\\
+ \operatorname{Match}(i,\kw{Encode}[\kw{Employee},\kw{Xml}])
+   =\{\theta_T\mid T\text{ is a closed monotype}\}.
+\end{gathered}
+\]
 The prerequisite types depend on a choice that result matching cannot make.
 
-Besides $i$, let $\Delta$ contain exactly
-$r_0:\kw{Repr}[\kw{Person},\Int]$,
-$r_1:\kw{Repr}[\kw{Person},\Str]$, and $s:\TS[\Str]$.
+Let $\Delta$ contain exactly the four implementations $e_0,e_1,c,i$ from the
+introduction. The two encoder choices lead to different conversion requests:
 \[
 \begin{array}{c|c|c|c}
  \text{first prerequisite} & \text{forced choice} & \text{second prerequisite} & \text{outcome}\\ \hline
- r_0 & B=\Int & \TS[\Int] & \text{unavailable}\\
- r_1 & B=\Str & \TS[\Str] & s
+ e_0 & B=\kw{Yaml} & \kw{Convert}[\kw{Yaml},\kw{Xml}] & \text{unavailable}\\
+ e_1 & B=\kw{Json} & \kw{Convert}[\kw{Json},\kw{Xml}] & c
 \end{array}
 \]
-Both representation choices match locally; only the second extends to evidence
+Both encoder choices match locally; only the second extends to evidence
 for the whole goal:
 \[
- p=i[\kw{Person}][\Str]\{r_1\}\{s\}.
+ p=i[\kw{Employee}][\kw{Json}][\kw{Xml}]\iarg{e_1}\iarg{c}.
 \]
 This is the role of a shared type variable: the choice made for one prerequisite
 constrains the others.
@@ -1539,7 +1711,7 @@ Add one producer requiring all clauses:
 Its type arguments are the assignment; its implicit arguments certify the clauses:
 \[
  \underbrace{f[V_{b_1}]\cdots[V_{b_n}]}_{\text{one assignment for the whole formula}}
- \underbrace{\{d_1\}\cdots\{d_m\}}_{\text{one satisfied-clause dictionary per clause}}
+ \underbrace{\iarg{d_1}\cdots\iarg{d_m}}_{\text{one satisfied-clause dictionary per clause}}
  :G.
 \]
 
@@ -1601,16 +1773,16 @@ directions; write $G\leadsto P$ when solving $G$ creates prerequisite $P$:
 \]
 With $s_0:D(Z)$, the first search finishes:
 \[
- \kw{wrap}[S(Z)]\{\kw{wrap}[Z]\{s_0\}\}:D(S(S(Z))).
+ \kw{wrap}[S(Z)]\iarg{\kw{wrap}[Z]\iarg{s_0}}:D(S(S(Z))).
 \]
 With only $\kw{unwrap}$, the second search has no base case and keeps generating
 different goals. A test for repeated goals would not stop it.
 Yet rejecting $\kw{unwrap}$ entirely would discard valid constructions: adding
 $s_3:D(S(S(S(Z))))$ gives
 \[
- \kw{unwrap}[Z]\{
-   \kw{unwrap}[S(Z)]\{
-     \kw{unwrap}[S(S(Z))]\{s_3\}\}\}:D(Z).
+ \kw{unwrap}[Z]\iarg{
+   \kw{unwrap}[S(Z)]\iarg{
+     \kw{unwrap}[S(S(Z))]\iarg{s_3}}}:D(Z).
 \]
 A rule can fall outside a terminating fragment while still being useful.
 
@@ -1646,7 +1818,7 @@ does not supply that polynomial bound.
 Instead of restricting dependency growth, bound the evidence cost by $N$.
 Allow instance types $\forall\overline\alpha.\tau$, where $\tau$, the goal,
 and all inferred type arguments are monotypes. This permits the open parameter
-in the printer example and the shared choices in the 3-SAT reduction.
+in the employee encoding example and the shared choices in the 3-SAT reduction.
 
 First erase the unknown type arguments from a candidate program, leaving its
 instance heads, applications, and references to earlier spines. There are finitely
@@ -1662,14 +1834,15 @@ Unification uses the occurs check: an equation such as $A=S(A)$ has no finite-ty
 solution. Unconstrained variables may be assigned $\Int$.
 No bound on the size of these monotype solutions is required.
 
-For example, two structures in the printer problem yield
+For the employee request, the result equation first fixes $A=\kw{Employee}$
+and $C=\kw{Xml}$. The two choices of encoder then yield
 \[
 \begin{array}{c|c|c}
- \text{candidate structure} & \text{equations} & \text{unification}\\ \hline
- i[A][B]\{r_0\}\{s\}
-   & A=\kw{Person},\ B=\Int,\ B=\Str & \text{fails}\\
- i[A][B]\{r_1\}\{s\}
-   & A=\kw{Person},\ B=\Str,\ B=\Str & [A\mapsto\kw{Person},B\mapsto\Str]
+ \text{candidate structure} & \text{remaining equations} & \text{unification}\\ \hline
+ i[A][B][C]\iarg{e_0}\iarg{c}
+   & B=\kw{Yaml},\ B=\kw{Json} & \text{fails}\\
+ i[A][B][C]\iarg{e_1}\iarg{c}
+   & B=\kw{Json},\ B=\kw{Json} & [B\mapsto\kw{Json}]
 \end{array}
 \]
 Each solution supplies a well-typed construction. Conversely, erasing type arguments
@@ -1681,7 +1854,7 @@ the cost-bounded, monotype-argument fragment, including instances that violate d
 The bounded SMT formulation leaves both the construction choices and their type
 equations symbolic in one query. A constraint imposed by one prerequisite can
 therefore restrict choices for another before a complete construction is chosen.
-For the printer, the second prerequisite forces $B=\Str$, excluding $r_0$ as the
+For the employee encoder, the second prerequisite forces $B=\kw{Json}$, excluding $e_0$ as the
 first argument. The triangle example makes the same interaction inconsistent.
 
 \begin{center}
@@ -1760,9 +1933,9 @@ from $q_2$ to $q_h$:
 \begin{array}{c|c|l}
  \text{machine configuration} & \text{evidence type} & \text{construction}\\ \hline
  (q_0,0,0) & C_{q_0}(Z,Z) & z_0=s\\[3pt]
- (q_1,1,0) & C_{q_1}(S(Z),Z) & z_1=u[Z][Z]\{z_0\}\\[3pt]
- (q_2,1,1) & C_{q_2}(S(Z),S(Z)) & z_2=v[S(Z)][Z]\{z_1\}\\[3pt]
- (q_h,0,1) & C_{q_h}(Z,S(Z)) & z_3=w[Z][S(Z)]\{z_2\}
+ (q_1,1,0) & C_{q_1}(S(Z),Z) & z_1=u[Z][Z]\iarg{z_0}\\[3pt]
+ (q_2,1,1) & C_{q_2}(S(Z),S(Z)) & z_2=v[S(Z)][Z]\iarg{z_1}\\[3pt]
+ (q_h,0,1) & C_{q_h}(Z,S(Z)) & z_3=w[Z][S(Z)]\iarg{z_2}
 \end{array}
 \]
 Typing also rejects illegal machine steps. Applying $w$ when the first counter
@@ -1778,7 +1951,7 @@ Redirect exits to a halting state $q_h$, and introduce
 \[
  h:\forall A,B.\ C_{q_h}(A,B)\Rightarrow G,\qquad G=\{\kw{halted}:\Int\}.
 \]
-For the displayed run, $h[Z][S(Z)]\{z_3\}:G$.
+For the displayed run, $h[Z][S(Z)]\iarg{z_3}:G$.
 
 \newpage
 \textbf{Why the correspondence holds for every run.}
@@ -1819,300 +1992,963 @@ question itself, shared by SMT-based and specialized approaches.
 
 
 \newpage
-\subsection{Evidence inference in existing languages}
-\label{sec:existing-languages}
-Use $C(\overline A)$ for a class or trait obligation. Two different problems arise
-when a programmer omits arguments:
+\section{Ambiguity and deterministic resolution}
+\label{sec:ambiguity}
+Finding one construction establishes that an implicit argument can be supplied.
+It does not establish that the compiler has enough information to choose that
+argument. For distinct closed record types $P,G$, consider
 \[
-\begin{array}{c|c|c}
- \text{application after inserting unknowns} & \text{constraint} & \text{task}\\ \hline
- \kw{id}[?A]\;3
-   & ?A=\Int & \text{infer a type argument}\\[3pt]
- \kw{display}[?A]\{?d\}\;3
-   & ?A=\Int,\quad ?d:\TS[\Int] & \text{infer the type and construct evidence}
-\end{array}
+ \Delta=[d_0:P,\ d_1:P,\ f:P\Rightarrow G].
 \]
-Here $\kw{id}:\forall A.A\to A$ and
-$\kw{display}:\forall A.\TS[A]\Rightarrow A\to\Str$.
-The first equation determines an omitted type. The second still leaves an evidence
-term to find. Lean and Rocq expose ordinary implicit arguments and typeclass search
-as separate elaboration mechanisms~\cite{lean-functions,rocq-implicit}.
-
-For a comparison with hidden type arguments, reuse Section~\ref{sec:synthesis-hardness}:
+The same request admits two constructions:
 \[
- i:\forall A,B.\ \kw{Repr}[A,B]\Rightarrow\TS[B]\Rightarrow\TS[A],
- \qquad G=\TS[\kw{Person}].
-\]
-After fixing $A=\kw{Person}$, the underlying evidence question in the available
-instance environment is
-\[
- \boxed{\exists B,r,s.\quad
- \Pj r{\kw{Repr}[\kw{Person},B]}\ \land\ \Pj s{\TS[B]}.}
-\]
-The issue is how each language constrains, infers, or searches for $B$.
-
-\textbf{Haskell: instance heads, termination conditions, and functional dependencies.}
-GHC selects instances by matching their heads against the wanted constraint.
-Under the ordinary non-overlapping policy, the match must be unique; prerequisite
-contexts do not disambiguate matching heads~\cite{ghc-termination}.
-For an instance $P_1,\ldots,P_k\Longrightarrow Q$, the default Paterson conditions
-include
-\[
- \operatorname{occ}_\alpha(P_i)\le\operatorname{occ}_\alpha(Q),\qquad
- |P_i|<|Q|,\qquad
- P_i\text{ contains no type-family application}.
-\]
-Here $|P|$ counts type constructors and variables in the class arguments,
-and $\operatorname{occ}_\alpha(P)$ counts occurrences of $\alpha$.
-The printer rule fails the first condition for $B$:
-\[
- \operatorname{occ}_B(\kw{Repr}[A,B])=1
- \quad>\quad \operatorname{occ}_B(\TS[A])=0.
-\]
-The \texttt{UndecidableInstances} extension relaxes the declaration restrictions;
-GHC then retains a reduction-depth limit~\cite{ghc-termination}.
-
-A functional dependency $A\mapsto B$ on $\kw{Repr}$ supplies additional information:
-\[
- \kw{Repr}[A,B_1]\land\kw{Repr}[A,B_2]\Longrightarrow B_1=B_2.
-\]
-It can make a parameter determined indirectly, even when absent from the result
-type~\cite{ghc-dependencies}. In the printer model, this law excludes simultaneous
-representations at $\Int$ and $\Str$ for the same $\kw{Person}$.
-It changes the permitted relation between types, and therefore the choice problem.
-
-\textbf{Rust: constrained implementation parameters and associated types.}
-Rust requires an implementation's type parameters to be constrained by its
-implementing type, trait arguments, or qualifying associated-type equalities.
-A direct translation of the printer rule leaves $B$ only in prerequisite bounds,
-so violates this requirement~\cite{rust-impl}.
-An associated type instead expresses
-\[
- B=\operatorname{Out}_{\kw{Repr}}(A),\qquad
- \kw{Repr}(A)\land\TS[\operatorname{Out}_{\kw{Repr}}(A)]
- \Longrightarrow\TS[A].
-\]
-The representation type is an output of the selected trait implementation.
-Rust also rejects overlapping ordinary trait implementations and restricts
-implementation ownership through its orphan rules~\cite{rust-impl}.
-These coherence rules do not establish unrestricted termination: recursive trait
-requirements can overflow~\cite{rust-overflow}.
-
-\newpage
-\textbf{Scala 3: recursive construction with a preference policy.}
-Given instances and conditional givens supply values and producers whose context
-parameters induce further searches~\cite{scala-givens}.
-Scala 3 selects among eligible candidates using scope and specificity. Ambiguity
-in a recursive prerequisite propagates to the enclosing search; a divergent branch
-is treated as failure so that other alternatives can still be tried~\cite{scala-resolution}.
-
-Take distinct types $P,G$, with $a_0,a_1$ equally preferred in the same scope:
-\[
- \Delta=[a_0:P,\ a_1:P,\ f:P\Rightarrow G].
-\]
-Then the evidence relation and the resolution policy answer different questions:
-\[
-\begin{array}{c|c}
- \text{existence of typed evidence} & \text{Scala-style disambiguation}\\ \hline
- f\{a_0\}:G,\quad f\{a_1\}:G
-   & \mathsf{search}(P)=\mathsf{ambiguous}\\
- \exists p.\ \Pj p G
-   & \mathsf{search}(G)=\mathsf{ambiguous}
-\end{array}
-\]
-Thus existence alone is insufficient for a successful implicit call.
-Our bounded synthesizer accepts either composite witness; the Scala policy also
-asks whether its candidate preferences select one.
-
-\textbf{OCaml: explicit modules and the modular implicits proposal.}
-The standard OCaml module mechanism passes implementations explicitly through
-functors or first-class modules~\cite{ocaml-modules}.
-For the printer example, a caller can choose a representation module $R$ and a
-printer module $S$, subject to a type-sharing equation:
-\[
- F(R)(S),\qquad R.\kw{input}=\kw{Person},\qquad
- R.\kw{output}=S.\kw{input}.
-\]
-Module checking verifies this composition; the module arguments identify which
-implementations the caller selected.
-
-The modular implicits proposal adds automatic selection of implicit modules and
-applications of implicit functors~\cite{modular-implicits}. A typical recursive
-construction has the shape
-\[
- \kw{PrintList}(\kw{PrintList}(\kw{PrintInt}))
- \quad:\quad \TS[\kw{List}(\kw{List}(\Int))].
-\]
-Its scope admits multiple implementations, but resolution requires a unique solution.
-For repeated applications of the same implicit functor, the proposal checks
-decreasing constraints; here the payloads decrease as
-\[
- \kw{List}(\kw{List}(\Int))
- \ \leadsto\ \kw{List}(\Int)
- \ \leadsto\ \Int.
-\]
-Failure of that termination check is an error: an unexplored branch could conceal
-a second solution, so finding one successful branch would not establish
-uniqueness~\cite{modular-implicits}.
-
-This gives a concrete contrast between search contracts:
-\[
-\begin{array}{c|c|c}
- & \text{one finite solution found} & \text{another branch diverges}\\ \hline
- \text{bounded existence} & \text{sufficient for success} & \text{outside the bounds is irrelevant}\\
- \text{modular implicits} & \text{uniqueness still required} & \text{termination error}\\
- \text{Scala 3} & \text{candidate preferences still apply} & \text{try other alternatives}
-\end{array}
-\]
-The modular implicits row describes the proposed extension, separately from
-OCaml's standard explicit module passing.
-
-\newpage
-\textbf{Lean 4: input modes, output parameters, and tabled resolution.}
-Lean uses ordinary implicit arguments for unification and instance-implicit
-arguments for typeclass synthesis~\cite{lean-functions}.
-For ordinary instances, unknown input parameters suspend search. Marking a parameter
-\texttt{outParam} permits synthesis to determine it; \texttt{semiOutParam} also
-permits an unknown output but uses a known value during matching~\cite{lean-synthesis}.
-For the representation relation, the distinction is
-\[
-\begin{array}{c|c}
- \text{parameter modes} & \text{request with unknown }B\\ \hline
- \kw{Repr}_{\mathrm{in,in}}[\kw{Person},?B]
-   & \text{stuck until }B\text{ becomes known}\\[3pt]
- \kw{Repr}_{\mathrm{in,out}}[\kw{Person},?B]
-   & \text{may return }B=T,\quad r:\kw{Repr}[\kw{Person},T]
-\end{array}
-\]
-Default instances provide an additional fallback that can instantiate input
-parameters. Priorities and declaration order affect candidate selection;
-an output annotation permits inference, rather than imposing Haskell's
-functional-dependency law~\cite{lean-synthesis}.
-
-Lean's tabled resolution records search problems and their answers, addressing
-repeated work in diamonds and repeated visits to cycles~\cite{tabled-resolution}.
-These are distinct from generating infinitely many different goals:
-\[
- \underbrace{D(T)\leadsto D(T)}_{\text{a repeated goal}}
+ \Pj{f\iarg{d_0}}G
  \qquad\qquad
- \underbrace{D(T)\leadsto D(S(T))\leadsto D(S(S(T)))\leadsto\cdots}_{\text{different goals}},
+ \Pj{f\iarg{d_1}}G.
 \]
-where $S(T)=\{\kw{succ}:T\}$ and $D$ is the dictionary family from
-Section~\ref{sec:polynomial-resolution}.
-Lean also limits synthesized instance size and search work~\cite{lean-synthesis}.
-Tabling addresses the first phenomenon; it does not turn the unrestricted problem
-of Section~\ref{sec:unbounded-undecidability} into a decidable one.
+The two instances of $P$ may implement different behavior, which $f$ can expose.
+The current resolver accepts whichever construction its successful query returns.
+This is a known limitation: neither an ambiguity check nor a general deterministic
+selection rule is part of that query. The nearest-exact rule settles direct
+requests by lexical preference, but does not detect their alternatives either.
+The following are proposed extensions, not guarantees of the current resolver.
 
-\textbf{Rocq (Coq): unification, typeclass proof search, and canonical structures.}
-Ordinary implicit arguments are inferred from other arguments and their types
-or from the expected context~\cite{rocq-implicit}.
-Typeclass resolution uses \texttt{typeclasses eauto}, registered hints, and
-unification. It can instantiate existential variables and backtrack; modes can
-instead require inputs to be known. Depth-first search is the default, with
-configurable breadth-first search and depth limits~\cite{rocq-typeclasses}.
+\subsection{Which differences count as ambiguity?}
+Two different SMT assignments need not represent different constructions.
+They may differ only in unused argument positions, the order of independent
+spines, or whether a repeated subtree is shared. Ambiguity must be defined on
+the decoded evidence, rather than on the complete solver model.
 
-Consequently, the hidden-type problem can be explored as a proof-search tree.
-Write a state as $(\mathcal G;\sigma)$, with pending goals $\mathcal G$ and
-substitution $\sigma$:
+We propose comparing the tree of instance references and eliminations. For a
+fixed context $\Delta$, define its \emph{construction shape} by
 \[
- \mathcal S_0=(\kw{Repr}[\kw{Person},B],\TS[B];\varnothing).
+\begin{aligned}
+ \kappa(d_j)&=\kw{Ref}(j),\\
+ \kappa(p[B])&=\kw{Inst}(\kappa(p)),\\
+ \kappa(p\iarg{q})&=\kw{App}(\kappa(p),\kappa(q)).
+\end{aligned}
+\]
+Here $j$ identifies a binding in the fixed context, and spine references have
+already been expanded. The type argument's payload is omitted, but the
+type-application node is retained: applying a type abstraction evaluates its
+body. The core calculus does not inspect type arguments at runtime. Consequently,
+equal shapes give the same executable term after erasing type payloads, with
+the same references to instance values.
+
+For example, if $g:\forall\alpha.\,G$, the constructions $g[\Int]$ and
+$g[\Bool]$ have the same shape. In contrast,
+\[
+ \kappa(f\iarg{d_0})=\kw{App}(\kw{Ref}(f),\kw{Ref}(d_0))
+ \ne\kw{App}(\kw{Ref}(f),\kw{Ref}(d_1))=\kappa(f\iarg{d_1}),
+\]
+where binding names stand for their identities. This is a criterion of
+\emph{construction ambiguity}. Distinct shapes may still compute equal results;
+for example, two separately declared instances may have identical bodies.
+Deciding equivalence of arbitrary instance behavior would require deciding
+program equivalence in a core language with general recursion.
+
+For the bounded programs of Section~\ref{sec:bounded-programs}, let
+\[
+ \mathcal K_{N,H}
+   =\{\kappa(p_\pi)\mid\pi\in\mathcal W_{N,H}\},
+\]
+where $p_\pi$ is the decoded root evidence. The proposed acceptance policy is
+\[
+\begin{array}{c|c}
+ |\mathcal K_{N,H}| & \text{resolution judgment within }N,H\\ \hline
+ 0 & \text{absent}\\
+ 1 & \text{accept the unique construction shape}\\
+ \ge2 & \text{ambiguous: exhibit two distinct shapes}
+\end{array}
+\]
+This policy compares all constructions admitted by the evidence rules.
+A language that instead excludes lower-priority instances must specify that
+exclusion in its admissibility relation before checking uniqueness.
+
+\newpage
+\subsection{A second-witness constraint}
+\label{sec:ambiguity-query}
+The root shape can be constructed alongside the symbolic types. Introduce
+algebraic datatype values $K_{i,t}$ for the shape of each active spine prefix:
+\[
+\begin{aligned}
+ K_{i,0}&=\kw{Ref}(j_i),\\
+ a_{i,t}=[B]&\Longrightarrow
+   K_{i,t}=\kw{Inst}(K_{i,t-1}),\\
+ a_{i,t}=\iarg{k}&\Longrightarrow
+   K_{i,t}=\kw{App}(K_{i,t-1},K_{k,\ell_k})\qquad(k<i).
+\end{aligned}
+\]
+Only active positions contribute to the root $K_{n-1,\ell_{n-1}}$.
+Let $\mathcal D_n(X,K)$ denote these equations together with
+$K=K_{n-1,\ell_{n-1}}$, where $X$ collects the program choices and auxiliary
+variables. A selector $\nu$ chooses the spine count; combine every allowed count:
+\[
+ \Psi_{N,H}(X,K)
+   =\bigvee_{n=1}^{N}
+       \bigl(\nu=n\land\Phi_n^\star(X_n)\land\mathcal D_n(X_n,K)\bigr).
+\]
+Here $X=(\nu,X_1,\ldots,X_N)$, each branch has its own variables $X_n$, and
+decoding uses the selected branch. The formula $\Phi_n^\star$ includes the
+complete validity constraints from Section~\ref{sec:refinement}.
+
+Suppose a first valid model decodes to $p_0$, with shape $K_0$.
+Ask for an alternative by adding one structural disequality:
+\[
+ \boxed{\Psi_{N,H}(X,K)\ \land\ K\ne K_0.}
+\]
+This is model enumeration projected onto the evidence shape, an application of
+blocking selected model values~\cite{programming-smt}. Its outcomes have different
+logical meanings:
+\[
+\begin{array}{c|l}
+ \text{second query} & \text{justified conclusion, given }p_0\\ \hline
+ \mathsf{sat} & p_0,p_1:G\text{ with }\kappa(p_0)\ne\kappa(p_1):\ \text{ambiguous}\\
+ \mathsf{unsat} & \mathcal K_{N,H}=\{K_0\}:\ \text{unique within the bounds}\\
+ \mathsf{unknown} & \text{uniqueness remains unresolved}
+\end{array}
+\]
+For the opening example, once the first query selects $f\iarg{d_0}$, the
+disequality excludes that whole construction shape, including every redundant
+encoding of it. The remaining solution $f\iarg{d_1}$ certifies ambiguity.
+
+Equivalently, two independently renamed copies can ask for ambiguity directly:
+\[
+ \boxed{\Psi_{N,H}(X,K)\land\Psi_{N,H}(Y,K')\land K\ne K'.}
+\]
+The copies share $\Gamma,\Delta,G,N,H$, but no choices or auxiliary variables.
+This formula is satisfiable exactly when $|\mathcal K_{N,H}|\ge2$.
+Its unsatisfiability establishes \emph{at most} one shape; an existence query
+still distinguishes a unique solution from no solution.
+
+All spine counts matter. With $\Delta=[d:P,s:P\Rightarrow P]$, the goal $P$
+has witnesses $d$ and $s\iarg{d}$, costing one and three nodes respectively.
+The first successful spine count sees only $d$. An ambiguity check with $N\ge3$
+must also consider the larger construction. The nearest-exact shortcut can
+supply the first witness, but cannot discharge the second-witness query.
+
+\textbf{Why the existing encoding is sufficient for this comparison.}
+An existence-preserving simplification need not preserve the number of solutions.
+Here the label deletion $F_L$ from Section~\ref{sec:refinement} has a stronger
+property for construction shapes:
+\[
+ \kappa(p_{F_L(\pi)})=\kappa(p_\pi).
+\]
+It changes only type-argument payloads. Since
+$F_L(\mathcal W_{N,H})\subseteq\mathcal W^L_{N,H}
+ \subseteq\mathcal W_{N,H}$, where
+$\mathcal W^L_{N,H}=\bigcup_{n=1}^{N}\mathcal W^L_{n,N,H}$,
+\[
+ \boxed{\mathcal K_{N,H}
+   =\{\kappa(p_\pi)\mid\pi\in\mathcal W^L_{N,H}\}
+   =\{K\mid\exists X.\ \Psi_{N,H}(X,K)\}.}
+\]
+Thus the second-witness constraint is both sound and complete for the stated
+bounded ambiguity question. Comparing fully annotated terms instead would
+require a separate argument: $F_L$ can identify distinct type arguments.
+
+\textbf{Does ambiguity checking need completeness?}
+The required guarantees depend on the conclusion:
+\[
+\begin{array}{p{0.26\linewidth}|p{0.65\linewidth}}
+ Prove ambiguity & Two valid, distinct witnesses suffice; exhaustive search is unnecessary.\\[4pt]
+ Prove uniqueness & A witness and sound unsatisfiability of a formula covering every admitted alternative.\\[4pt]
+ Always classify a request & A terminating, complete decision procedure for that domain.
+\end{array}
+\]
+A solver that is incomplete in general can still establish uniqueness for a
+particular query by returning sound $\mathsf{unsat}$. Failure to find an
+alternative, a timeout, or $\mathsf{unknown}$ does not establish uniqueness.
+
+SMT does not inherently prevent completeness or determinism. Decidability depends
+on the theories and formula fragment~\cite{smt-theories}. In this bounded problem,
+the finite label vocabulary, finite rigid context, type-height bound, and program
+bound leave finitely many relevant choices. Their typing relations can therefore
+be expanded into a finite propositional formula and decided completely. The
+current recursive encoding and resource-limited solver are not promised to
+realize that complete procedure.
+
+Satisfiability asks whether a model exists; it does not designate a preferred
+model~\cite{smt-standard}. A solver may use deterministic heuristics or randomized
+search. Fixing a random seed changes neither the set of solutions nor the need
+to exclude alternatives. The present limitation is in accepting one witness
+without a selection or uniqueness condition.
+
+\subsection{Deterministic selection by a canonical minimum}
+\label{sec:canonical-evidence}
+The second-witness test determines whether alternatives exist, but its two
+reported witnesses can still depend on solver search order. A separate logical
+condition can make the returned evidence, and any ambiguity report, deterministic.
+
+Let $\mathcal P^L_{N,H}=\{p_\pi\mid\pi\in\mathcal W^L_{N,H}\}$, using
+canonical type representations. This is a finite set of typed evidence trees.
+Fix a structural total order $\prec$ on these trees: compare the number of
+evidence constructors first, then compare constructors and children
+lexicographically, using the lexical order of binding identities and a fixed
+structural order of canonical types. The comparison uses decoded trees;
+unused spines and alternative sharing arrangements do not participate.
+
+For nonempty $\mathcal P^L_{N,H}$, the canonical result is
+\[
+ p_{\min}=\min_{\prec}\mathcal P^L_{N,H}.
+\]
+Writing $p_X$ for the evidence decoded from $X$, its specification is
+\[
+ \Psi_{N,H}(X,K)\ \land\
+ \neg\exists Y,K'.\,
+   \bigl(\Psi_{N,H}(Y,K')\land p_Y\prec p_X\bigr).
+\]
+The quantifier states minimality; it need not be delegated to a general
+quantified solver. Starting from any valid $p_0$, repeatedly solve the
+existential improvement query
+\[
+ \Psi_{N,H}(Y,K')\land p_Y\prec p_i.
+\]
+On $\mathsf{sat}$, replace $p_i$ with the decoded smaller witness.
+On $\mathsf{unsat}$, return $p_i$. Each successful step strictly decreases
+$\prec$ in a finite set, so a complete terminating bounded solver makes this
+procedure terminate at the same $p_{\min}$, independently of intermediate
+models. An inconclusive query leaves minimality unresolved.
+
+Minimality alone does not establish uniqueness: a total order chooses one element
+even when many exist. To combine deterministic output with ambiguity rejection,
+minimize twice:
+\[
+\begin{aligned}
+ p_0&=\min_{\prec}\mathcal P^L_{N,H},\\
+ \mathcal A&=\{p\in\mathcal P^L_{N,H}\mid\kappa(p)\ne\kappa(p_0)\},\\
+ \operatorname{Resolve}_{N,H}&=
+ \begin{cases}
+  \mathsf{absent}&\mathcal P^L_{N,H}=\varnothing,\\
+  \mathsf{accept}(p_0)&\mathcal P^L_{N,H}\ne\varnothing\land\mathcal A=\varnothing,\\
+  \mathsf{ambiguous}(p_0,\min_{\prec}\mathcal A)&\mathcal A\ne\varnothing.
+ \end{cases}
+\end{aligned}
+\]
+The first two definitions apply when the original set is nonempty. The second
+minimization uses the same constraints plus $K\ne\kappa(p_0)$.
+This gives deterministic witnesses and diagnostics for the bounded policy.
+Alternatively, a language could deliberately accept $p_{\min}$ even when
+$\mathcal A\ne\varnothing$; that would define a preference policy, not prove
+coherence of the unrestricted evidence relation.
+
+\newpage
+\subsection{A complete polynomial algorithm without polymorphism}
+\label{sec:ambiguity-finite-grammar}
+The fixed-dependency fragment of Section~\ref{sec:polynomial-resolution} admits
+a stronger result: construction ambiguity can be decided without any program
+bound, even when cycles generate infinitely many evidence trees.
+Assume finite $\Delta$, a closed goal, and no $\forall$ anywhere in their types.
+Let $S$ be their finite set of type subexpressions. Evidence of each type
+$T\in S$ is generated by the grammar
+\[
+\begin{array}{rcll}
+ E_T&::=&d_j & (d_j:T\in\Delta),\\
+    &\mid&E_{A\Rightarrow T}\iarg{E_A}&(A\Rightarrow T\in S).
+\end{array}
+\]
+Every evidence tree has a unique type and a unique outer constructor.
+In an application, the function subtree also determines $A$ uniquely.
+The alternatives in the grammar are therefore disjoint sets of trees, so
+addition counts alternatives and multiplication counts argument combinations.
+
+Only the distinction between zero, one, and at least two is needed. Set
+$c_T^{(0)}=0$ and iterate
+\[
+ \boxed{c_T^{(r+1)}=
+ \min\!\left(2,\
+   |\{j\mid d_j:T\in\Delta\}|+
+   \sum_{A\Rightarrow T\in S}
+     c_{A\Rightarrow T}^{(r)}c_A^{(r)}\right).}
+\]
+Induction on $r$ identifies $c_T^{(r)}$ with the number of evidence trees of
+height at most $r$, truncated at two. The iteration is monotone in the finite
+lattice $\{0,1,2\}^{S}$. Each coordinate increases at most twice, so there are
+at most $2|S|$ strict rounds, each scanning only the facts and arrows in the
+input closure. The least fixed point is computable in polynomial time and gives
+\[
+ c_G^*=\min\!\left(2,\,
+   |\{\kappa(p)\mid\Pj p G\}|\right).
+\]
+The formula includes an infinite cardinality on the right when there are
+infinitely many constructions; truncation still yields two.
+
+For a record type $P$, the role of a cycle is explicit:
+\[
+\begin{array}{c|c|c|l}
+ \Delta & \text{fixed-point equation for }c_P & c_P^* & \text{evidence}\\ \hline
+ {[s:P\Rightarrow P]} & c_P=\min(2,c_P) & 0 & \text{none}\\
+ {[d:P,s:P\Rightarrow P]} & c_P=\min(2,1+c_P) & 2 & d,\ s\iarg{d},\ s\iarg{s\iarg{d}},\ldots
+\end{array}
+\]
+In both rows $c_{P\Rightarrow P}^*=1$. The first cycle has no seed; the second
+has infinitely many constructions. Counting up to two decides their ambiguity
+without enumerating those constructions. This is a complete alternative on the
+stated fragment; polymorphic instantiation invalidates the finite-type-closure
+argument and requires a different analysis.
+
+\newpage
+\subsection{Why unrestricted uniqueness remains undecidable}
+\label{sec:ambiguity-undecidable}
+Having one witness does not make the general uniqueness question decidable.
+Take the machine encoding $\Delta_M,G$ from
+Section~\ref{sec:unbounded-undecidability}. Add a fresh record type and two
+instances:
+\[
+ U=\{\kw{unique}:\Int\},\qquad
+ \Delta'_M=\Delta_M+[a:U,\ w:G\Rightarrow U].
+\]
+The label $\kw{unique}$ is fresh. Every original prerequisite and configuration
+result retains its fixed outer record tags, so neither $a$ nor an application
+of $w$ can supply an original machine prerequisite. The new declarations do not
+create any new evidence for $G$.
+
+Let $\mathcal K(\Delta,T)=\{\kappa(p)\mid
+\cdot;\Delta\vdash_{\mathrm{ev}}p:T\}$, without bounds. Only $a$ and $w$
+produce $U$, giving the exact decomposition
+\[
+ \mathcal K(\Delta'_M,U)
+   =\{\kw{Ref}(a)\}
+     \cup\{\kw{App}(\kw{Ref}(w),K)\mid K\in\mathcal K(\Delta_M,G)\}.
+\]
+Thus the always-available witness $a:U$ is unique exactly when the machine
+does not halt:
+\[
+\begin{array}{c|c|c}
+ \text{machine} & \text{constructions of }U & \text{judgment}\\ \hline
+ \text{does not halt} & a & \text{unique}\\
+ \text{halts with evidence }p:G & a,\ w\iarg{p} & \text{ambiguous}
+\end{array}
+\]
+A terminating, sound, complete ambiguity checker for unrestricted evidence
+would therefore decide the machine halting problem. This impossibility holds
+even when a first witness is supplied. Enumerating well-typed evidence and
+stopping at two distinct shapes semidecides ambiguity; the unique case has no
+general finite stopping criterion.
+
+The same extension applies to the tagged-record 3-SAT construction of
+Section~\ref{sec:synthesis-hardness}. For its environment $\Delta_\varphi$,
+\[
+\begin{aligned}
+ \varphi\text{ satisfiable}
+   &\iff U\text{ has at least two construction shapes},\\
+ \varphi\text{ unsatisfiable}
+   &\iff a\text{ is the unique construction shape for }U.
+\end{aligned}
+\]
+The wrapper adds two nodes to a witness. Bounds $N=n+2m+3$ and $H=1$ therefore
+suffice for this reduction: bounded ambiguity is NP-hard, and bounded uniqueness
+is coNP-hard, already for these inputs with a known witness. Decidability of a
+bounded query does not imply a polynomial decision procedure.
+
+Finally, a bounded uniqueness result has exactly its stated scope:
+\[
+ |\mathcal K_{N,H}|=1
+ \quad\not\Longrightarrow\quad
+ |\mathcal K(\Delta,G)|=1.
+\]
+Larger bounds may reveal another construction. A complete fragment such as
+Section~\ref{sec:ambiguity-finite-grammar} can certify unrestricted uniqueness;
+otherwise an unrestricted second-witness search must permit an unresolved
+outcome. This boundary belongs to the synthesis problem, independently of
+whether its search uses SMT or a specialized algorithm.
+
+\newpage
+\appendix
+\section{Surface language and elaboration}
+\label{sec:surface-language}
+A source program consists of declarations and a final expression. Elaboration
+expands its type and trait declarations, checks its expressions, and inserts
+evidence requests. The result is one implicit term whose requests are solved
+using the evidence relation of Section~\ref{sec:calculus}.
+
+\subsection{Expressions and primitive operations}
+\label{sec:expression-notation}
+\textbf{Expression notation for the typing rules} (with resolved annotation types):
+\[
+\begin{array}{rcl}
+e&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{e}\mid\ilam{d}{A}{e}\mid\lambda x.e
+ \mid e(e)\mid e\iarg{e}\\
+&&\mid\Lambda\alpha.e\mid e[A]\mid\letin{x}{e}{e}\mid\instancelet{d}{A}{e}{e}\mid\fix{x}{A}{e}\\
+&&\mid\{\ell_j=e_j\}_{j\in J}\mid e.\ell\mid(e:A)\mid\need A
+ \mid e_1\mathbin{\odot}e_2
+\end{array}
+\]
+The surface program has separate declarations and expressions, as specified in
+Appendix~\ref{sec:syntax}. Elaborating its declarations expands type and trait names
+and constructs a single unresolved term. The notation above describes the common
+binding and typing operations used in that translation.
+The syntax $e.\ell$ is an unclassified selection with an arbitrary term receiver. Elaboration determines
+whether a selection becomes a core projection or a method applied to its receiver.
+Both $x$ and $d$ are parsed as names; lexical name resolution distinguishes their binders.
+
+\textbf{Implicit terms}:
+\[
+\begin{array}{rcl}
+c&::=&x\mid d\mid n\mid b\mid s\mid\lam{x}{A}{c}\mid\ilam{d}{A}{c}
+ \mid c\,c\mid c\iarg{c}\\
+&&\mid\Lambda\alpha.c\mid c[A]\mid\letin{x:A}{c}{c}\mid\instancelet{d}{A}{c}{c}\mid\fix{x}{A}{c}\\
+&&\mid\{\ell_j=c_j\}_{j\in J}\mid c.\ell\mid\hole A
+ \mid c_1\mathbin{\odot}c_2
+\end{array}
+\]
+Implicit terms contain no aliases, traits, definitions, modules, or method-resolution operation.
+An \emph{instance let} $\instancelet{d}{A}{c_1}{c_2}$ binds $d:A$ in the evidence
+context of $c_2$. $\hole A$ is a deferred request, not a runtime term.
+
+\textbf{Primitive binary operators}\label{sec:primitives}:
+\[
+\begin{array}{c|c|c}
+\odot & \argop\odot & \resop\odot\\\hline
++,-,\times & \Int & \Int\\
+\mathsf{==},<,> & \Int & \Bool\\
+\mathbin{+\!+} & \Str & \Str
+\end{array}
 \]
 \[
 \begin{aligned}
- \mathcal S_0&\xrightarrow{r_0}
-   (\TS[\Int];[B\mapsto\Int])
-   \ \longrightarrow\ \mathsf{failure}\\
- \mathcal S_0&\xrightarrow{r_1}
-   (\TS[\Str];[B\mapsto\Str])
-   \ \xrightarrow{s}\ (\varnothing;[B\mapsto\Str]).
+\delta_+(m,n)&=m+n, &\delta_-(m,n)&=m-n, &\delta_\times(m,n)&=mn,\\
+\delta_{==}(m,n)&=(m=n),&\delta_<(m,n)&=(m<n),&\delta_>(m,n)&=(m>n),\\
+\delta_{++}(s,t)&=st.&&&&
 \end{aligned}
 \]
-Backtracking restores $\mathcal S_0$, including the unsolved $B$, before trying $r_1$.
-This trace assumes modes permit solving $B$ and alternatives remain available.
-In particular, Rocq's optional \texttt{Unique Instances} setting commits to a
-solved class goal, while \texttt{Unique Solutions} asks the search to establish
-uniqueness. Such settings change the search contract~\cite{rocq-typeclasses}.
+Here $b\in\{\mathsf{true},\mathsf{false}\}$; comparisons produce Boolean values.
 
-Canonical structures provide another way to recover an omitted record from
-a projection equation. For a registered structure $D_{\Int}$ with
-$\operatorname{carrier}(D_{\Int})=\Int$,
+\newpage
+\subsection{Surface programs and their translation}
+\label{sec:syntax}
+Parsing produces a program consisting of top-level declarations followed by one
+final expression. The declaration forms are \texttt{type}, \texttt{trait},
+\texttt{implement}, \texttt{instance}, and \texttt{def}:
 \[
- \operatorname{carrier}(?D)=\Int
- \quad\leadsto\quad ?D=D_{\Int}.
+\begin{aligned}
+ \Pi&=(\bar D,\hat e),\\
+ D&::=\kw{type}\ C[\bar a]=\hat A
+       \mid\kw{trait}\ C[\bar a]=\hat A\\
+  &\quad\mid\kw{implement}\ H\,\pi=\hat e
+       \mid\kw{instance}\ d\,H:\hat A=\hat e\\
+  &\quad\mid\kw{def}\ f\,H(\bar p):\hat A=\hat e.
+\end{aligned}
 \]
-The canonical-structure registry indexes this extension of a projection to a
-record; it is distinct from typeclass hint search~\cite{rocq-canonical}.
+Here $H$ is an optional type parameter clause, $\pi$ a trait reference, and
+$\bar p$ a parameter list. Instance parameter lists are expanded as described below.
+Write $\hat e$ for a parsed surface expression and $\hat A$ for a named surface type.
+Expressions include ordinary let bindings and local evidence bindings, each with a body:
+\[
+\begin{aligned}
+\texttt{let x = e in b}&\longmapsto\letin{x}{\hat e}{\hat b},\\
+\texttt{let x: A = e in b}&\longmapsto\letin{x}{(\hat e:\hat A)}{\hat b},\\
+\texttt{given d: A = e in b}&\longmapsto\instancelet{d}{\hat A}{\hat e}{\hat b}.
+\end{aligned}
+\]
+A \texttt{given} requires its annotation; an ordinary let may synthesize the initializer's
+type. Neither binder is in scope in its own initializer. Braces and parentheses only
+group expressions. Declarations precede the final expression and cannot occur inside it.
+Elaboration consumes the declarations and produces one implicit term; type and trait
+declarations leave no runtime node.
 
-\newpage
-\textbf{Consequences for the SMT comparison.}
-The surveyed systems constrain different parts of the same inference problem:
+\subsubsection*{Types and expression forms}
 \begin{center}
-\begin{tabular}{@{}
- >{\raggedright\arraybackslash}p{0.16\linewidth}
- >{\raggedright\arraybackslash}p{0.39\linewidth}
- >{\raggedright\arraybackslash}p{0.37\linewidth}@{}}
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}ll@{}}
 \toprule
-System & How choices are controlled & How recursive search is controlled\\
+Source type & Named abstract type\\
 \midrule
-GHC
-  & Instance-head matching; overlap policy; functional dependencies
-  & Default declaration checks; reduction limit when relaxed\\[4pt]
-Rust
-  & Implementation constraints, associated types, coherence
-  & Trait-solving limits and overflow detection\\[4pt]
-Scala 3
-  & Scope and specificity; unresolved ambiguity is an error
-  & Divergence checks; alternative branches remain eligible\\[4pt]
-OCaml modules
-  & Caller supplies module arguments
-  & Explicit composition is checked\\[4pt]
-Modular implicits
-  & A unique implicit module expression is required
-  & Repeated functor applications must decrease\\[4pt]
-Lean 4
-  & Input/output modes, priorities, and default instances
-  & Tabled search plus size and work limits\\[4pt]
-Rocq
-  & Unification, hints, modes, and optional commitment/uniqueness
-  & Configurable proof-search strategy and depth\\[4pt]
-This calculus
-  & Any admissible bounded witness; nearest exact match first
-  & Construction-cost and type-argument bounds\\
+\texttt{Int}, \texttt{String}, \texttt{Bool} & $\Int,\ \Str,\ \Bool$\\
+$C$, $C[A_1,\ldots,A_n]$ & $C$, $C[\hat A_1,\ldots,\hat A_n]$\\
+\texttt{A -> B} & $\hat A\to\hat B$\\
+\texttt{A \textasciitilde{}> B} & $\hat A\Rightarrow\hat B$\\
+$\texttt{forall }a_1,\ldots,a_n\texttt{. }B$ & $\forall a_1.\cdots\forall a_n.\hat B$\\
+$\{\ell_1:A_1,\ldots,\ell_n:A_n\}$ & $\{\ell_1:\hat A_1,\ldots,\ell_n:\hat A_n\}$\\
+$(A)$ & $\hat A$\\
 \bottomrule
 \end{tabular}
 \end{center}
-The concrete examples above motivate three separate comparison questions:
+Both arrows associate to the right. A type name is retained as written; elaboration
+determines whether it denotes a bound type variable or a lexical synonym. A trait name
+is rejected in every ordinary type position, including annotations, type arguments,
+\texttt{summon}, and explicitly written implicit parameters.
+
+Names and literals translate to $x$, $n$, $b$, and $s$; string escapes are decoded.
+The remaining nonbinding forms translate as follows:
 \begin{center}
-\begin{tabular}{@{}
- >{\raggedright\arraybackslash}p{0.30\linewidth}
- >{\raggedright\arraybackslash}p{0.34\linewidth}
- >{\raggedright\arraybackslash}p{0.28\linewidth}@{}}
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}ll@{}}
 \toprule
-Family & Property being tested & Relevant comparison\\
+Source expression & Named abstract expression\\
 \midrule
-Finite dependency diamonds/cycles
-  & Reuse and termination & Closure or tabled resolution\\[4pt]
-Hidden parameters and shared clauses
-  & Consistent choices across prerequisites & Unification with backtracking\\[4pt]
-Multiple successful implementations
-  & Which witness is acceptable & Ambiguity and preference policies\\
+$\{\ell_1=e_1,\ldots,\ell_n=e_n\}$ & $\{\ell_1=\hat e_1,\ldots,\ell_n=\hat e_n\}$\\
+\texttt{e: A} & $(\hat e:\hat A)$\\
+\texttt{summon[A]} & $\need{\hat A}$\\
+\texttt{e.field} & $\hat e.\mathit{field}$\\
+\texttt{P::field} & $\hat P\mathbin{::}\mathit{field}$\\
+\texttt{f(a)}, \texttt{f a} & $\hat f(\hat a)$\\
+\texttt{f(using a)} & $\hat f\iarg{\hat a}$\\
+\texttt{f[A]} & $\hat f[\hat A]$\\
+$e_1\mathbin{\odot}e_2$ & $\hat e_1\mathbin{\odot}\hat e_2$\\
+\texttt{(e)}, \texttt{\{ e \}} & $\hat e$\\
 \bottomrule
 \end{tabular}
 \end{center}
-The first two concern finding evidence; the third concerns the meaning of accepting
-one witness among alternatives. For example, if two printing dictionaries return
-different strings, both can satisfy the same type while producing observably
-different results.
+Field assignments distinguish a record literal from a brace group; \texttt{\{\}} is
+the empty record. Duplicate labels are rejected before fields become a finite map.
+A grouped expression can contain nested let and given expressions.
+Consequently, \texttt{f \{ e \}} translates to the ordinary application $\hat f(\hat e)$.
+Binary operators use the primitive operations specified in Appendix~\ref{sec:primitives}.
 
-Our formal claim is the bounded existence equivalence of Section~\ref{sec:refinement}.
-A performance comparison should give SMT and a specialized search the same evidence
-grammar, type equality, bounds, and witness-selection requirement. Lean's tabled
-resolution and Rocq's backtracking make composition and hidden-argument inference
-existing capabilities to compare against. The empirical question is how effectively
-SMT propagates shared constraints and excludes inconsistent combinations.
+\subsubsection*{Binders and application lists}
+A lambda parameter group contains one or more comma-separated entries
+\texttt{x}, \texttt{x: A}, or \texttt{implicit d: P}. Ordinary lambda annotations are optional;
+implicit parameters require annotations. Declaration parameters in \texttt{def} and
+\texttt{instance} require annotations. Concatenate repeated groups in source order
+to obtain $\bar p=[p_1,\ldots,p_n]$. Each entry wraps an abstract body $E$:
+\[
+\begin{aligned}
+\mathcal L_x(E)&=\lambda x.E,\\
+\mathcal L_{x:A}(E)&=\lam{x}{\hat A}{E},\\
+\mathcal L_{\texttt{implicit }d:P}(E)&=\ilam{d}{\hat P}{E},\\
+\mathcal L_{\bar p}(E)&=
+ \mathcal L_{p_1}(\mathcal L_{p_2}(\cdots\mathcal L_{p_n}(E)\cdots)).
+\end{aligned}
+\]
+A lambda \texttt{(}$\bar p$\texttt{) => e} translates to $\mathcal L_{\bar p}(\hat e)$.
+A single unannotated parameter also admits \texttt{x => e}, producing $\lambda x.\hat e$.
+Comma-separated parameters and repeated groups therefore produce the same nested binders,
+with the first parameter outermost. For example:
+\[
+\texttt{(a: A, implicit b: B, c: C) => e}
+ \quad\longmapsto\quad
+ \lam{a}{\hat A}{\ilam{b}{\hat B}{\lam{c}{\hat C}{\hat e}}}.
+\]
+Type lambdas \texttt{[}$a_1,\ldots,a_n$\texttt{] => e} translate to
+$\Lambda a_1.\cdots\Lambda a_n.\hat e$.
+
+Argument lists instead accumulate applications from left to right. Each \texttt{using}
+marks just its own argument; type-argument lists likewise produce successive type applications:
+\[
+\begin{aligned}
+\texttt{f(a, using b, c)}&\longmapsto ((\hat f(\hat a))\iarg{\hat b})(\hat c),\\
+\texttt{f[A, B]}&\longmapsto(\hat f[\hat A])[\hat B].
+\end{aligned}
+\]
+Automatic insertion of missing implicit arguments belongs to elaboration of ordinary
+application; the parser preserves the applications actually written.
+
+\subsubsection*{Declarations, programs, and type parameters}
+A file is a declaration sequence followed by a final expression:
+\[
+ \texttt{d}_1\texttt{;}\cdots\texttt{;}\texttt{d}_n\texttt{;}\texttt{e}
+ \quad\longmapsto\quad ([\hat d_1,\ldots,\hat d_n],\hat e).
+\]
+Here \texttt{;} stands for \texttt{in}, a semicolon, or a newline. The same separators
+join a let or given initializer to its body.
+
+A \texttt{type C[}$\bar a$\texttt{] = A} declaration introduces an ordinary alias;
+\texttt{trait C[}$\bar a$\texttt{] = A} introduces a trait whose definition must
+expand to a record type. Both are sequential and nonrecursive. Parameters are distinct
+and the definition expands earlier aliases at declaration time. Its instantiated body
+is obtained by capture-avoiding substitution for those parameters. The frontend records
+the declaration kind, while the resulting calculus types are structural.
+
+Write $\pi=C[A_1,\ldots,A_m]$ for a trait reference and $\Sigma$ for the sequential
+declaration environment. The expansion $\traittype{\pi}_\Sigma=D$ is defined only
+when $C$ names a trait, the arity matches, and every $A_i$ is an ordinary type.
+$D$ is the dictionary's record type. Trait references occur in \texttt{where},
+\texttt{implement} targets, and qualified member access. Explicit dictionary values
+use ordinary record types or aliases.
+
+A type parameter clause has the form
+\[
+ H=\texttt{[}a_1,\ldots,a_n\ \texttt{where }\pi_1\ \texttt{and}\ \cdots
+ \ \texttt{and}\ \pi_k\texttt{]}.
+\]
+The type parameter list may be empty. The optional \texttt{where} clause, when present,
+contains one or more trait references separated by \texttt{and}. Type parameter clauses
+belong to \texttt{def}, \texttt{implement}, and \texttt{instance} declarations.
+After binding the type parameters, elaboration resolves $D_j=\traittype{\pi_j}_\Sigma$
+and uses these abstraction operations:
+\[
+\begin{aligned}
+\mathcal G_H(c)
+ &=\Lambda a_1.\cdots\Lambda a_n.
+   \ilam{d_1}{D_1}{\cdots\ilam{d_k}{D_k}{c}},\\
+\mathcal Q_H(T)
+ &=\forall a_1.\cdots\forall a_n.
+   D_1\Rightarrow\cdots\Rightarrow D_k\Rightarrow T.
+\end{aligned}
+\]
+For $\pi_j=C_j[\bar A_j]$, the generated binder $d_j$ is displayed as
+$\kw{imp\_}C_j$, freshened when that name is already in scope. These binders are
+source-inaccessible. An omitted clause makes both operations the identity.
+
+The two evidence declarations are
+\begin{lstlisting}
+implement[A where C[A]] D[A] = expression
+instance name[A where C[A]](parameters): R = expression
+\end{lstlisting}
+Type parameter clauses are optional; instance value parameters are also optional.
+The first form requires a trait target and is anonymous. The second requires a name
+and accepts any ordinary type. Both are top-level and nonrecursive.
+
+Instance value parameters use the same curried binders as lambdas. Their annotations
+also construct a function type, with each implicit parameter choosing $\Rightarrow$:
+\[
+\begin{aligned}
+\mathcal F_{x:A}(T)&=\hat A\to T,&
+\mathcal F_{\texttt{implicit }d:P}(T)&=\hat P\Rightarrow T,\\
+\mathcal F_{\bar p}(T)&=\mathcal F_{p_1}(\cdots\mathcal F_{p_n}(T)\cdots).
+\end{aligned}
+\]
+Thus \texttt{instance d}$H$\texttt{(}$\bar p$\texttt{): R = e} becomes the declaration
+$\kw{instance}\ d\,H:\mathcal F_{\bar p}(\hat R)=\mathcal L_{\bar p}(\hat e)$.
+With no value parameters, these operations are the identity.
+
+If $T$ is an implementation's expanded trait type or an instance's resolved annotation,
+the initializer is checked against $T$ under the clause's type and constraint binders.
+Let $c$ be that checked initializer and $b$ the elaboration of the remaining program.
+Both evidence declarations produce
+\[
+ \instancelet{d}{\mathcal Q_H(T)}{\mathcal G_H(c)}{b}.
+\]
+The new evidence binding is available only in $b$. A named \texttt{instance}
+preserves its written name; \texttt{implement C[}$\bar A$\texttt{]} generates a
+fresh $\kw{imp\_}C$ binder. A local \texttt{given d: A = e in b}
+instead checks $e$ against its ordinary annotation directly, then elaborates $b$ with
+$d:A$ in $\Delta$. A polymorphic local value uses an explicit universal annotation and
+type abstraction, for example \texttt{given id: forall A. A -> A = [A] => x => x in body}.
+Type and trait declarations update $\Sigma$ and contribute no term binding.
+
+\subsubsection*{Definitions and recursion}
+A definition retains its name, type parameters, value parameters, result annotation, and body:
+\begin{lstlisting}
+def f[A where C[A]](parameters): R = body
+\end{lstlisting}
+The type parameter clause and value parameter groups are optional; the result annotation is required.
+Let $V$ be the body abstracted over the written parameters and type parameter clause, and $T$ its
+full declared type, including those arrows and quantifiers. The generated \texttt{where}
+parameters precede the written parameters. A definition with no self-reference produces
+$\letin{f:T}{V}{b}$. Otherwise the body is checked with $f:T$ in $\Gamma$ and produces
+\[
+ \letin{f:T}{\fix{f}{T}{V}}{b}.
+\]
+A self-reference is a free term occurrence of $f$ in the abstracted body: parameter,
+lambda, let, and given shadowing are respected. A local binding does not bind its
+own initializer. Field labels and type names are not term references. Declarations
+are sequential; the self binding does not enable mutual or forward recursion.
+
+The surface restriction on recursive definitions is
+\[
+\begin{aligned}
+ \operatorname{function}(A\to B)&=\mathsf{true},&
+ \operatorname{function}(A\Rightarrow B)&=\mathsf{true},\\
+ \operatorname{function}(\forall\alpha.A)&=\operatorname{function}(A),&
+ \operatorname{function}(A)&=\mathsf{false}\quad\text{otherwise}.
+\end{aligned}
+\]
+Elaboration requires $\operatorname{function}(T)$ only when inserting a fixpoint.
+Thus \texttt{def x: Int = x} and a self-referencing record definition are rejected,
+while nonrecursive values of those types are allowed. The calculus's fixpoint has
+no function-type restriction. Neither the core nor the surface function check
+promises termination.
+
+For example, a nonrecursive definition
+\begin{lstlisting}
+def display[A where ToString[A]](x: A): String = x.toString
+rest
+\end{lstlisting}
+remains a definition declaration followed by the expression \texttt{rest} in the
+surface program. If $D_A=\{\kw{toString}:A\to\Str\}$, elaboration produces
+\[
+ \letin{\kw{display}:\forall A.D_A\Rightarrow A\to\Str}
+ {\Lambda A.\ilam{\kw{imp\_ToString}}{D_A}{\lam{x}{A}{(\hole{D_A}).\kw{toString}\;x}}}
+ {c_{\kw{rest}}}.
+\]
+This is one term: the trait and definition declarations have been consumed by elaboration.
+
+\subsubsection*{Grouping and the elaboration boundary}
+Precedence, from tightest to loosest, is adjacent postfix operations, application,
+\texttt{*}, \texttt{+}/\texttt{-}, \texttt{++}, comparisons, and ascription.
+Applications and binary operators associate to the left. Adjacency determines the argument
+tree: \texttt{f g(x)} parses as \texttt{f(g(x))}, while \texttt{f g (x)} parses as
+\texttt{f(g)(x)}. A negative argument is parenthesized, as in \texttt{f(-1)};
+\texttt{f - 1} is subtraction.
+
+A newline after a complete expression ends its application, selection, ascription, and
+operator chain, allowing it to separate a declaration initializer from its continuation.
+Line breaks are allowed where a component is still required, such as after \texttt{=}
+or \texttt{=>}. Record fields require commas, semicolons, or newlines, with an optional
+trailing separator. Comments are whitespace; newlines inside them also act as boundaries.
+
+The program records declaration order; expression binders record lexical nesting. Elaboration resolves term
+names against ordinary and implementation binders, resolves type names against type
+variables and synonyms, validates trait references, and checks annotations. It classifies each selection $e.\ell$
+using the receiver's type: an existing record field becomes a projection; otherwise the
+method rule may introduce an implementation request and apply its selected member to
+the receiver. For \texttt{P::field}, elaboration first resolves $P$ as a trait reference
+or ordinary type, obtaining a dictionary type $D$, then elaborates $(\need D).\mathit{field}$.
+Types and traits remain separate from term receivers:
+\texttt{ToString[A].toString} fails elaboration when \texttt{ToString} names only a trait.
+Evidence resolution later supplies implementations for the resulting requests.
 
 \newpage
-\section{Resolution and lowering}
+\subsubsection*{Worked translations}
+The following complete programs illustrate how declaration elaboration and expression translation compose. Symbols such as
+$v$ and $e_{\mathrm{body}}$ abbreviate subexpressions of the displayed mathematical tree.
+Generated binders are fresh and source-inaccessible.
+
+\textbf{1. Type abstractions with mixed parameters and arguments.}
+\begin{lstlisting}
+trait Default[A] = { value: A }
+def choose[A where Default[A]](fallback: A, implicit preferred: A)(last: A): A = preferred
+implement Default[Int] = { value = 11 }
+choose[Int](0, using 21, 99)
+\end{lstlisting}
+The definition introduces its type parameter, its generated constraint parameter, and then
+its three written parameters, in that order. After validating and expanding the trait:
+\[
+\begin{aligned}
+v_{\kw{choose}}
+ &=\Lambda A.\ilam{\kw{imp\_Default}}{\{\kw{value}:A\}}{
+   \lam{\kw{fallback}}{A}{
+   \ilam{\kw{preferred}}{A}{
+   \lam{\kw{last}}{A}{(\kw{preferred}:A)}}}},\\
+e
+ &=\letin{\kw{choose}}{v_{\kw{choose}}}{
+   \instancelet{\kw{imp\_Default}}{\{\kw{value}:\Int\}}{\{\kw{value}=11\}}{((\kw{choose}[\Int](0))\iarg{21})(99)}}.
+\end{aligned}
+\]
+Only the argument $21$ is marked implicit in the parsed call. When elaboration reaches
+the first ordinary argument $0$, it inserts the request for the leading \texttt{where}
+constraint. The unresolved call is therefore
+\[
+ ((\kw{choose}[\Int]\iarg{\hole{\{\kw{value}:\Int\}}})(0))\iarg{21}(99).
+\]
+Resolution supplies $\{\kw{value}=11\}$ for that request; $21$ is supplied directly to
+$\kw{preferred}$. The program returns $21$. Replacing the two parameter groups by
+\texttt{(fallback: A)(implicit preferred: A)(last: A)} gives the same abstract definition.
+
+\textbf{2. Typed bindings, brace groups, and local implementations.}
+\begin{lstlisting}
+type Box[A] = { value: A }
+let box: Box[Int] = {
+  let seed: Int = 20
+  given chosen: Int = seed + 1
+  { value = summon[Int] }
+}
+box.value
+\end{lstlisting}
+The initializer's outer braces group nested let and given expressions; the inner
+field assignment constructs a record. After annotations and the alias are resolved:
+\[
+\begin{aligned}
+e_{\mathrm{body}}
+ &=\letin{\kw{seed}:\Int}{20}{
+   \instancelet{\kw{chosen}}{\Int}{\kw{seed}+1}{\{\kw{value}=\hole{\Int}\}}},\\
+e
+ &=\letin{\kw{box}:\{\kw{value}:\Int\}}{e_{\mathrm{body}}}{\kw{box}.\kw{value}}.
+\end{aligned}
+\]
+The newline after the closing brace starts the continuation of \texttt{let box}.
+The implementation is available while constructing the record; its scope ends before
+$\kw{box}.\kw{value}$. The record retains the value $21$, which is the program's result.
+
+\newpage
+\subsection{Typing and elaboration: functions and bindings}
+\label{sec:elaboration-functions}
+\subsubsection*{Bidirectional judgments and name resolution}
+\[
+\boxed{\E e A c}\qquad\boxed{\EC e A c}
+\]
+The first judgment synthesizes $A$ from $e$; the second checks $e$ against an expected
+$A$. Both produce a fully annotated implicit term $c$. An unannotated lambda requires
+checking against an ordinary function type. Type annotations, application parameter types,
+definition signatures, and evidence declarations supply expected types. Checking propagates
+these types through nested lambdas, type abstractions, record fields, and binding bodies.
+Let initializers without annotations synthesize their types independently of later uses.
+No type is inferred backward from a lambda's body or from later calls.
+
+Resolution, target typing, and evaluation use the separate judgments
+\[
+\boxed{\R c t}\qquad\boxed{H\vdash t:T}\qquad\boxed{\eval\rho t v}.
+\]
+The implementation uses separate de Bruijn indices for $\Gamma$ and $\Delta$, and a
+type-variable depth. The final target has one term-index space.
+
+A nonrecursive synonym $C[\bar\alpha]=B$ expands $C[\bar A]$ to
+$B[\bar A/\bar\alpha]$ in its lexical body. Expansion is capture avoiding:
+the declaration's parameters bind only their own occurrences in $B$.
+Earlier aliases are expanded when the declaration is checked.
+$|\bar A|=|\bar\alpha|$ is required. Types and values resolve in separate namespaces.
+All annotation and expected types must be well formed. These judgments do not search
+for evidence; they insert deferred requests.
+
+\begin{mathpar}
+\inferrule*[right=E-Var]{x:A\in\Gamma}{\E x A x}
+
+\inferrule*[right=E-Instance]{d:A\in\Delta}{\E d A d}
+
+\inferrule*[right=E-Lambda]{\Gamma,x:A;\Delta\vdash e\Rightarrow B\rightsquigarrow c}
+ {\E{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
+
+\inferrule*[right=Check-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\lambda x.e}{A\to B}{\lam{x}{A}{c}}}
+
+\inferrule*[right=Check-Annotated-Lambda]{\Gamma,x:A;\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\lam{x}{A}{e}}{A\to B}{\lam{x}{A}{c}}}
+
+\inferrule*[right=E-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Rightarrow B\rightsquigarrow c}
+ {\E{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
+
+\inferrule*[right=Check-Implicit-Lambda]{\Gamma;(d:A)::\Delta\vdash e\Leftarrow B\rightsquigarrow c}
+ {\EC{\ilam{d}{A}{e}}{A\Rightarrow B}{\ilam{d}{A}{c}}}
+
+\inferrule*[right=E-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Rightarrow A\rightsquigarrow c\\
+ \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
+ {\E{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
+
+\inferrule*[right=Check-Type-Lambda]{\Gamma,\alpha;\Delta\vdash e\Leftarrow A\rightsquigarrow c\\
+ \alpha\notin\mathrm{FV}(\Gamma,\Delta)}
+ {\EC{\Lambda\alpha.e}{\forall\alpha.A}{\Lambda\alpha.c}}
+\end{mathpar}
+
+\begin{mathpar}
+\inferrule*[right=E-Type-App]{\E e {\forall\alpha.A} c\\\wf B}
+ {\E{e[B]}{A[B/\alpha]}{c[B]}}
+
+\inferrule*[right=E-Implicit-App]{\E{e_1}{A\Rightarrow B}{c_1}\\\EC{e_2}{A}{c_2}}
+ {\E{e_1\iarg{e_2}}{B}{c_1\iarg{c_2}}}
+
+\inferrule*[right=E-App]{\E{e_1}{T}{c_1}\\c_1:T\triangleright c'_1:A\to B\\\EC{e_2}{A}{c_2}}
+ {\E{e_1(e_2)}{B}{c'_1\,c_2}}
+
+\inferrule*[right=E-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
+ {\E{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
+
+\inferrule*[right=Check-Let]{\E{e_1}{A}{c_1}\\\Gamma,x:A;\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
+ {\EC{\letin{x}{e_1}{e_2}}{B}{\letin{x:A}{c_1}{c_2}}}
+
+\inferrule*[right=E-Instance-Let]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Rightarrow B\rightsquigarrow c_2}
+ {\E{\instancelet{d}{A}{e_1}{e_2}}{B}{\instancelet{d}{A}{c_1}{c_2}}}
+
+\inferrule*[right=Check-Instance-Let]{\EC{e_1}{A}{c_1}\\\Gamma;(d:A)::\Delta\vdash e_2\Leftarrow B\rightsquigarrow c_2}
+ {\EC{\instancelet{d}{A}{e_1}{e_2}}{B}{\instancelet{d}{A}{c_1}{c_2}}}
+
+\inferrule*[right=E-Fix]{\wf A\\\Gamma,x:A;\Delta\vdash e\Leftarrow A\rightsquigarrow c}
+ {\E{\fix{x}{A}{e}}{A}{\fix{x}{A}{c}}}
+
+\inferrule*[right=E-Ascribe]{\EC e A c}{\E{(e:A)}{A}{c}}
+
+\inferrule*[right=E-Need]{\wf A}{\E{\need A}{A}{\hole A}}
+
+\inferrule*[right=Check-Infer]{\E e A c\\e\text{ is not a checking introduction}}
+ {\EC e A c}
+\end{mathpar}
+The checking introductions are ordinary, implicit, and type lambdas, records, lets,
+and implementation bindings. They use their corresponding checking rules, including
+\textsc{Check-Record} below. Every supplied lambda annotation must equal the expected
+parameter type. Checking does not insert an ordinary, implicit, or type abstraction;
+the source determines the binder kind.
+
+\subsubsection*{Expose an ordinary application}
+\begin{mathpar}
+
+\inferrule*[right=Expose-Stop]{T\ne(P\Rightarrow Q)\text{ for every }P,Q}
+ {c:T\triangleright c:T}
+
+\inferrule*[right=Expose-Step]{c\iarg{\hole P}:Q\triangleright c':T}
+ {c:P\Rightarrow Q\triangleright c':T}
+\end{mathpar}
+Only ordinary application invokes this relation. In particular, returning an implicit
+function, referring to it by name, or passing it as an ordinary value does not force it.
+An implementation initializer is elaborated in the old $\Delta$: bindings are nonrecursive.
+
+\newpage
+\subsection{Typing and elaboration: records, primitives, and method syntax}
+\label{sec:elaboration-records}
+\begin{mathpar}
+
+\inferrule*[right=E-Int]{n\in\mathbb Z}{\E n\Int n}
+
+\inferrule*[right=E-String]{s\text{ a string}}{\E s\Str s}
+
+\inferrule*[right=E-Bool]{b\in\{\mathsf{true},\mathsf{false}\}}{\E b\Bool b}
+
+
+\inferrule*[right=E-Record]{\E{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
+ {\E{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
+
+\inferrule*[right=Check-Record]{\EC{e_j}{A_j}{c_j}\quad(j\in J)\\\ell_j\text{ distinct}}
+ {\EC{\{\ell_j=e_j\}_{j\in J}}{\{\ell_j:A_j\}_{j\in J}}{\{\ell_j=c_j\}_{j\in J}}}
+
+
+\inferrule*[right=E-Project]{\E e{\{\ell_j:A_j\}_{j\in J}}c\\ k\in J}
+ {\E{e.\ell_k}{A_k}{c.\ell_k}}
+
+
+\inferrule*[right=E-BinOp]{\EC{e_1}{\argop\odot}{c_1}\\
+ \EC{e_2}{\argop\odot}{c_2}}
+ {\E{e_1\mathbin{\odot}e_2}{\resop\odot}{c_1\mathbin{\odot}c_2}}
+\end{mathpar}
+
+\subsubsection*{Receiver-style method selection}
+For a receiver type $A$ and label $\ell$, define the finite set of \emph{types}
+\[
+\mathcal M_{\Delta,A,\ell}
+=\bigl\{(P,B)\ \bigm|\ (d:P)\in\Delta,\;
+ P=\{\ell_j:A_j\}_{j\in J},\;
+ \exists k\in J.\;\ell_k=\ell\land A_k=A\to B\bigr\}.
+\]
+Repeated occurrences of the same pair contribute one set member.
+Let $\operatorname{labels}(A)$ be the field labels when $A$ is a record, and $\varnothing$ otherwise.
+\begin{mathpar}
+
+\inferrule*[right=E-Method]{\E e A c\\\ell\notin\operatorname{labels}(A)\\
+ \mathcal M_{\Delta,A,\ell}=\{(P,B)\}}
+ {\E{e.\ell}{B}{(\hole P).\ell\;c}}
+\end{mathpar}
+Zero candidates reject the selection; two distinct candidate types reject it as ambiguous.
+This rule determines the request type, not its implementation. Actual record projection
+has priority; records without the requested field can also use this rule.
+Explicit qualification $\need P.\ell(e)$, written \texttt{P::member(e)} in source syntax,
+avoids this receiver-syntax restriction.
+
+\subsubsection*{The running qualified function}
+With $\TS[A]=\{\kw{toString}:A\to\Str\}$, the source definition
+\begin{lstlisting}
+def display[A where ToString[A]](x: A): String = x.toString
+\end{lstlisting}
+has type and unresolved body
+\[
+\begin{aligned}
+\kw{display}&:\forall A.\TS[A]\Rightarrow A\to\Str,\\
+c_{\kw{display}}&=\Lambda A.\ilam{\kw{imp\_ToString}}{\TS[A]}{
+ \lam{x}{A}{(\hole{\TS[A]}).\kw{toString}\;x}}.
+\end{aligned}
+\]
+Under $(\kw{imp\_ToString}:\TS[A])::\Delta$, evidence resolution may select
+$\kw{imp\_ToString}$.
+After successful resolution:
+\[
+\begin{aligned}
+ t_{\kw{display}}
+ &=\Lambda A.\lam{\kw{imp\_ToString}}{\TS[A]}{\lam{x}{A}{\kw{imp\_ToString}.\kw{toString}\;x}},\\
+ t_{\kw{display}}&:\forall A.\TS[A]\to A\to\Str.
+\end{aligned}
+\]
+A concrete call first becomes
+$c_{\kw{display}}[\Str]\iarg{\hole{\TS[\Str]}}\;s$.
+The request is solved in the \emph{caller's} lexical environment, while requests in
+an ordinary function body are solved in that body's definition environment.
+
+\newpage
+\section{Resolution and execution}
+\label{sec:execution}
+Resolution replaces each deferred request by checked evidence and lowers the
+implicit term to the explicit target. Target typing checks the result
+independently; call-by-value evaluation then executes the explicit program.
+
+\subsection{Resolution and lowering}
+\label{sec:lowering}
 \textbf{Type erasure} (identity on variables and base types):
 \[
 \begin{aligned}
@@ -2123,7 +2959,7 @@ SMT propagates shared constraints and excludes inconsistent combinations.
 \end{aligned}
 \]
 For evidence, $\erase d=d$, $\erase{p[A]}=\erase p[\erase A]$, and
-$\erase{p\{q\}}=\erase p\,\erase q$. Ordinary and instance names are
+$\erase{p\iarg{q}}=\erase p\,\erase q$. Ordinary and instance names are
 embedded in one target namespace; freshness prevents capture.
 
 \begin{mathpar}
@@ -2150,7 +2986,7 @@ embedded in one target namespace; freshness prevents capture.
  {\R{c_1\,c_2}{t_1\,t_2}}
 
 \inferrule*[right=R-Implicit-App]{\R{c_1}{t_1}\\\R{c_2}{t_2}}
- {\R{c_1\{c_2\}}{t_1\,t_2}}
+ {\R{c_1\iarg{c_2}}{t_1\,t_2}}
 
 
 \inferrule*[right=R-Type-Lambda]{\Gamma,\alpha;\Delta\vdash c\Longrightarrow t}
@@ -2163,8 +2999,8 @@ embedded in one target namespace; freshness prevents capture.
  {\R{\letin{x:A}{c_1}{c_2}}{\letin{x}{t_1}{t_2}}}
 
 
-\inferrule*[right=R-Impl]{\R{c_1}{t_1}\\\Gamma;(d:A)::\Delta\vdash c_2\Longrightarrow t_2}
- {\R{\impl{d}{A}{c_1}{c_2}}{\letin{d}{t_1}{t_2}}}
+\inferrule*[right=R-Instance-Let]{\R{c_1}{t_1}\\\Gamma;(d:A)::\Delta\vdash c_2\Longrightarrow t_2}
+ {\R{\instancelet{d}{A}{c_1}{c_2}}{\letin{d}{t_1}{t_2}}}
 
 
 \inferrule*[right=R-Record]{\R{c_j}{t_j}\quad(j\in J)}
@@ -2184,7 +3020,8 @@ embedded in one target namespace; freshness prevents capture.
 \end{mathpar}
 
 \newpage
-\section{Explicit target and independent typing}
+\subsection{Explicit target and independent typing}
+\label{sec:target}
 \[
 \begin{array}{rcl}
 T,U&::=&\alpha\mid\Int\mid\Bool\mid\Str\mid T\to U\mid\forall\alpha.T\mid\{\ell_j:T_j\}_{j\in J}\\
@@ -2194,7 +3031,7 @@ t&::=&z\mid n\mid b\mid s\mid\lam z T t\mid t\,t\mid\Lambda\alpha.t\mid t[T]\\
 H&::=&\cdot\mid H,\alpha\mid H,z:T
 \end{array}
 \]
-Target type formation is Section~1 with only the ordinary arrow. Every judgment assumes
+Target type formation is Section~\ref{sec:calculus} with only the ordinary arrow. Every judgment assumes
 that $H$ is well formed; all annotations and type arguments must be well formed in $H$.
 All record labels are distinct. The checker follows these syntax-directed rules to infer
 the unique type of a fully annotated term. Checking against an expected type first validates
@@ -2242,7 +3079,7 @@ type is well scoped at that depth.
  {H\vdash t_1\mathbin{\odot}t_2:\resop\odot}
 \end{mathpar}
 
-\subsection*{Phase invariant and index representation}
+\subsubsection*{Phase invariant and index representation}
 Let $H=\erase\Gamma\cup\erase\Delta$ merge the two term environments using the
 same globally fresh names. The phase invariant is
 \[
@@ -2259,7 +3096,8 @@ the $\Delta$ embedding. A type binder weakens type indices in both environments 
 in embedded evidence. Type substitution is capture avoiding.
 
 \newpage
-\section{Call-by-value evaluation}
+\subsection{Call-by-value evaluation}
+\label{sec:evaluation}
 \[
 \begin{array}{rcl}
 v&::=& n\mid b\mid s\mid\{\ell_j=v_j\}_{j\in J}\mid
@@ -2334,9 +3172,9 @@ once those children return, preserving the same substitution equations without c
 host call stack. Inserted terms are shifted to preserve their free variables, then evaluated
 according to the ordinary rules.
 
-\subsection*{Closed-program execution}
+\subsubsection*{Closed-program execution}
 Write $\Pi\rightsquigarrow_{\mathrm{surface}}c:A$ for the sequential declaration and
-expression elaboration specified in Section~\ref{sec:syntax}, starting in empty environments.
+expression elaboration specified in Appendix~\ref{sec:syntax}, starting in empty environments.
 \begin{mathpar}
 
 \inferrule*[right=Execute]{
@@ -2363,6 +3201,23 @@ William F. Dowling and Jean H. Gallier.
 Journal of Logic Programming 1(3), pp.~267--284, 1984.
 \href{https://doi.org/10.1016/0743-1066(84)90014-1}{doi:10.1016/0743-1066(84)90014-1}.
 
+\bibitem{wadler-blott}
+Philip Wadler and Stephen Blott.
+\emph{How to make ad-hoc polymorphism less ad hoc}.
+Proceedings of POPL, pp.~60--76, 1989.
+\href{https://doi.org/10.1145/75277.75283}{doi:10.1145/75277.75283}.
+
+\bibitem{cochis}
+Tom Schrijvers, Bruno C.\,D.\,S. Oliveira, Philip Wadler, and Koar Marntirosian.
+\emph{COCHIS: Stable and coherent implicits}.
+Journal of Functional Programming 29, e3, 2019.
+\href{https://doi.org/10.1017/S0956796818000242}{doi:10.1017/S0956796818000242}.
+
+\bibitem{haskell-classes}
+Simon Marlow (editor).
+\emph{Haskell 2010 Language Report}, Chapter~6: Predefined Types and Classes.
+\href{https://www.haskell.org/onlinereport/haskell2010/haskellch6.html}{Standard classes and container instances}.
+
 \bibitem{ghc-termination}
 The GHC Team.
 \emph{Instance declarations and resolution}.
@@ -2381,15 +3236,31 @@ Andrew Reynolds, and Yoni Zohar.
 \emph{Satisfiability Modulo Theories: A Beginner's Tutorial}, section on SMT theories.
 \href{https://cvc5.github.io/tutorials/beginners/theories.html}{Online edition}.
 
+\bibitem{smt-standard}
+Clark Barrett, Pascal Fontaine, and Cesare Tinelli.
+\emph{The SMT-LIB Standard, Version 2.7}. Release of 7 July 2025.
+\href{https://smt-lib.org/papers/smt-lib-reference-v2.7-r2025-07-07.pdf}{Model and satisfiability-query semantics}.
+
+\bibitem{programming-smt}
+Nikolaj Bj{\o}rner, Leonardo de Moura, Lev Nachmanson, and Christoph Wintersteiger.
+\emph{Programming Z3}, Section~5.1: Blocking evaluations.
+\href{https://z3prover.github.io/papers/programmingz3.html}{Projected model enumeration}.
+
 \bibitem{rust-impl}
 The Rust Project.
 \emph{The Rust Reference: Implementations}.
 \href{https://doc.rust-lang.org/reference/items/implementations.html}{Trait coherence and parameter constraints}.
 
-\bibitem{rust-overflow}
+\bibitem{rust-parameters}
 The Rust Project.
-\emph{Error E0275: overflow evaluating a trait requirement}.
-\href{https://doc.rust-lang.org/stable/error_codes/E0275.html}{Error-code reference}.
+\emph{RFC 447: No unused implementation parameters}. 2014.
+\href{https://rust-lang.github.io/rfcs/0447-no-unused-impl-parameters.html}{Design rationale and declaration rules}.
+
+\bibitem{rust-resolution-limits}
+The Rust Compiler Team.
+\emph{Rust Compiler Development Guide: Caching in the new trait solver},
+section \emph{Dealing with overflow}.
+\href{https://rustc-dev-guide.rust-lang.org/solve/caching.html#dealing-with-overflow}{Recursion limits in trait resolution}.
 
 \bibitem{ghc-dependencies}
 The GHC Team.

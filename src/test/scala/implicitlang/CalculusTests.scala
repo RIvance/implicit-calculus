@@ -644,7 +644,7 @@ object CalculusTests {
     test("ordinary and implementation binders have separate indices") {
       val parsed = success(new Parser().parse("instance d: Int = 21 in (x: String) => d"))
       val actual = success(new Elaborator().elaborate(parsed)).expression
-      assert(actual == ImplicitTerm.Impl(
+      assert(actual == ImplicitTerm.InstanceLet(
         Type.IntType,
         ImplicitTerm.IntLit(21),
         ImplicitTerm.Lam(Type.StringType, ImplicitTerm.Instance(0), Some("x")),
@@ -1916,10 +1916,31 @@ object CalculusTests {
       val mixed = ImplicitTerm.ImplicitLam(
         Type.IntType, ImplicitTerm.Lam(Type.IntType, ImplicitTerm.Instance(0), Some("value")), Some("value")
       )
-      assert(ImplicitPrinter.term(mixed) == "λ{value: Int}. λ(value1: Int). value")
+      assert(ImplicitPrinter.term(mixed) == "λ⟨value: Int⟩. λ(value1: Int). value")
       val abstracted = success(Compiler.prepare("def id[A](value: A): A = value in id"))
       val rendered = ImplicitPrinter.term(abstracted.elaborated.expression)
       assert(rendered.contains("let id:") && rendered.contains("ΛA. λ(value: A). value"))
+    }
+
+    test("trait evidence has fresh implementation names while named instances retain their spelling") {
+      import implicitlang.`implicit`.ImplicitPrinter
+      val prepared = success(Compiler.prepare(
+        """trait Show[A] = { show: A -> String }
+          |instance imp_Show: Int = 21
+          |implement Show[String] = { show = (text: String) => text }
+          |def display[A where Show[A]](value: A): String = Show[A]::show(value)
+          |given local: Int = imp_Show
+          |display[String]("Ada")""".stripMargin
+      ))
+      val rendered = ImplicitPrinter.term(prepared.elaborated.expression)
+      assert(rendered.startsWith("instance imp_Show: Int = 21 in\n"))
+      assert(rendered.contains("instance imp_Show1: {show: String → String}"))
+      assert(rendered.contains("ΛA. λ⟨imp_Show2: {show: A → String}⟩. λ(value: A)."))
+      assert(rendered.contains("instance local: Int = imp_Show in\n"))
+      val report = prepared.resolve.run(new SmtSynthesizer())
+      assert(report.goals.head.request.names.instances == List("imp_Show2", "imp_Show1", "imp_Show"))
+      assert(report.goals.last.request.names.instances == List("local", "imp_Show1", "imp_Show"))
+      assert(success(Evaluator.evaluate(success(report.result).target)) == Value.Text("Ada"))
     }
 
     test("resolution reports retain lexical names and completed goals when a later goal fails") {

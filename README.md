@@ -2,8 +2,7 @@
 
 A research implementation of bounded SMT synthesis for implicit evidence in a two-context calculus.
 The synthesizer jointly chooses polymorphic type arguments and compositions of available values,
-using type instantiation and implicit application. The [formal specification](docs/calculus.tex) develops
-the constraints, a worked satisfying model and its typing derivation, and the search's guarantees and bounds.
+using type instantiation and implicit application.
 
 The Scala 3 implementation includes a surface language whose traits describe record dictionaries.
 `implement` declares a top-level implementation;
@@ -174,7 +173,8 @@ implicitly and `b` ordinarily. Write `f(using a, using b)` to supply both implic
 A trailing implicit parameter remains a first-class
 implicit function until applied. Type lambdas use `[T] => body`, for example
 `[T] => (x: T) => x`. All lambda bodies use `=>`; implicit function types use `~>`.
-The mathematical notation remains `λ{d:A}` and `A ⇒ B`.
+Mathematical terms use `λ⟨d:A⟩. c` for implicit abstraction, `f⟨d⟩` for implicit
+application, and `A ⇒ B` for implicit function types.
 
 Elaboration uses bidirectional typing. An unannotated lambda checks against an expected
 function type, supplied by an annotation, a declaration signature, or an argument's parameter
@@ -331,9 +331,7 @@ between different solutions with the same chain count.
 `SynthesisUnknown` preserves Z3's reason, including timeout, and `SynthesisBackend` preserves
 a native/API failure's cause. Neither is reported as a missing instance. With an empty Δ,
 or after exhaustive search of the finite universal-free fragment, `MissingInstance` is a
-proven absence. The [formal specification, Section 5](docs/calculus.tex) gives the encoding,
-its bounds, and the independent validation contract. Sections 5.4–5.5 work through a complete
-query, a satisfying model, and the resulting evidence derivation. Each native check owns and closes its context.
+proven absence.
 
 `NaiveSynthesizer` remains available as an exact-lookup baseline for comparisons. It performs
 no instantiation or composition and is not a fallback for SMT failure.
@@ -392,7 +390,6 @@ src/main/scala-jvm/implicitlang/
 src/main/scala-js/implicitlang/smt/SmtBrowserSolver.scala
 src/test/scala/implicitlang/CalculusTests.scala
 playground/       Scala.js bridge, React application, browser tests
-docs/calculus.tex
 examples/*.imp
 ```
 
@@ -452,19 +449,6 @@ Record labels are unique and unordered. Integers are arbitrary precision.
 The calculus is pure. Its primitive binary operators are integer `+`, `-`, `*`, `==`, `<`, `>` and
 string `++`. The comparison operators return `Bool`. There is no built-in integer-to-string
 conversion: a printer for integers is a separate library concern, not a primitive expression.
-
-## Formal specification
-
-`docs/calculus.tex` specifies syntax, parser equations, Γ/Δ elaboration, admissible evidence,
-resolution/erasure, target typing, and call-by-value evaluation. Rules use alpha-renamed
-names; implementation indices are explained separately. No mechanized metatheory is claimed.
-Rebuild the PDF with:
-
-```sh
-cd docs
-pdflatex -interaction=nonstopmode -halt-on-error calculus.tex
-pdflatex -interaction=nonstopmode -halt-on-error calculus.tex
-```
 
 Dependencies: [Scala 3.3.6](https://www.scala-lang.org/download/3.3.6.html) and
 [Scala parser combinators](https://github.com/scala/scala-parser-combinators).

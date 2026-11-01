@@ -110,7 +110,7 @@ final class Resolver {
         resolvedBody <- resolve(body, context.bindOrdinary(annotation, hint), location / TermChild.Body)
       } yield Term.Let(resolvedValue, resolvedBody)
     }
-    case ImplicitTerm.Impl(annotation, value, body, hint) => {
+    case ImplicitTerm.InstanceLet(annotation, value, body, hint) => {
       for {
         resolvedValue <- resolve(value, context, location / TermChild.Value)
         resolvedBody <- resolve(body, context.bindInstance(annotation, hint), location / TermChild.Body)
@@ -169,7 +169,7 @@ final class Resolver {
       } yield result
     }
     case ImplicitTerm.ImplicitApp(function, argument) => {
-      // Γ; Δ ⊢ev p : A ⇒ B    Γ; Δ ⊢ev q : A  /  Γ; Δ ⊢ev p{q} : B   (P-Implicit-App)
+      // Γ; Δ ⊢ev p : A ⇒ B    Γ; Δ ⊢ev q : A  /  Γ; Δ ⊢ev p⟨q⟩ : B   (P-Implicit-App)
       for {
         producer <- checkEvidence(function, context)
         actual <- checkEvidence(argument, context)
