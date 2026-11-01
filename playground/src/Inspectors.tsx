@@ -1,9 +1,97 @@
 import { useMemo, useState } from 'react';
 import { Accordion, Badge, Button, Group, Pagination, SegmentedControl, Select, Table, TextInput } from '@mantine/core';
 import { Copy, Download, Search, Table2 } from 'lucide-react';
-import type { Attempt, ModelValue } from '../bridge/protocol';
+import { renderToString } from 'katex';
+import type { Attempt, Constraint, MathFormula, ModelValue } from '../bridge/protocol';
 import { download } from './document';
 import { subscript } from './EvidenceGraph';
+
+function Mathematics({ latex }: { latex: string }) {
+  const html = renderToString(latex, { trust: false, strict: 'error', output: 'htmlAndMathml' });
+  return <div className="constraint-math" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function statementParts(formula: Constraint['formula']): MathFormula[] {
+  return formula ? (formula.premise ? [formula.premise, formula.conclusion] : [formula.conclusion]) : [];
+}
+
+function ConstraintFormula({ formula }: { formula: Constraint['formula'] }) {
+  if (!formula) return null;
+  return (
+    <div className="constraint-statement">
+      {formula.premise && (
+        <div className="constraint-premise">
+          <span>When</span>
+          <Mathematics latex={formula.premise.latex} />
+        </div>
+      )}
+      <Mathematics latex={formula.conclusion.latex} />
+    </div>
+  );
+}
+
+function ConstraintNotation({ attempt }: { attempt: Attempt }) {
+  return (
+    <div className="constraint-notation">
+      <div className="constraint-query">
+        <span>
+          {attempt.spineCount} spines · root z{subscript(attempt.spineCount - 1)}
+        </span>
+        {attempt.assumptions.map((formula, index) => (
+          <Mathematics key={index} latex={formula.latex} />
+        ))}
+      </div>
+      <div className="constraint-symbols">
+        <span>
+          <Mathematics latex={'\\tau_i'} /> type of zᵢ
+        </span>
+        <span>
+          <Mathematics latex="h_i" /> chosen instance
+        </span>
+        <span>
+          <Mathematics latex={'\\ell_i'} /> arguments supplied
+        </span>
+      </div>
+      <details>
+        <summary>Argument and type notation</summary>
+        <dl>
+          <dt>
+            <Mathematics latex="a_{i,j}=[B_{i,j}]" />
+          </dt>
+          <dd>Position j of zᵢ supplies the type Bᵢ,ⱼ. Positions start at 0.</dd>
+          <dt>
+            <Mathematics latex={'a_{i,j}=\\langle z_{k_{i,j}}\\rangle'} />
+          </dt>
+          <dd>Position j supplies evidence from the earlier spine kᵢ,ⱼ.</dd>
+          <dt>
+            <Mathematics latex="T[B]" />
+          </dt>
+          <dd>Instantiate the outer ∀ of T with B, avoiding capture.</dd>
+          <dt>
+            <Mathematics latex={'\\operatorname{Poly}(T)'} />
+          </dt>
+          <dd>T begins with a universal quantifier.</dd>
+          <dt>
+            <Mathematics latex={'\\operatorname{Valid}_{q,H}(B)'} />
+          </dt>
+          <dd>B is well formed under q type binders, has height at most H, and uses this query’s record labels.</dd>
+          <dt>
+            <Mathematics latex={'\\tau_{i,j}^{f}'} />
+          </dt>
+          <dd>Residual type after j arguments when zᵢ starts from f.</dd>
+          <dt>
+            <Mathematics latex={'\\uparrow_c^d T'} />
+          </dt>
+          <dd>Raise the free type indices in T by d above cutoff c, preserving locally bound variables.</dd>
+          <dt>
+            <Mathematics latex={'\\bot'} />
+          </dt>
+          <dd>This combination of choices is impossible.</dd>
+        </dl>
+      </details>
+    </div>
+  );
+}
 
 export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
   const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
@@ -43,18 +131,22 @@ export function ConstraintExplorer({
   const filtered = useMemo(
     () =>
       attempt.constraints.filter((constraint) => {
-        const text = `${constraint.formula} ${constraint.explanation} ${constraint.rule}`.toLowerCase();
+        const text = `${statementParts(constraint.formula)
+          .map((part) => part.text)
+          .join(' ')} ${constraint.smtlib} ${constraint.explanation} ${constraint.rule}`.toLowerCase();
         return (
+          (notation === 'smt' || constraint.formula !== null) &&
           (!rule || constraint.rule === rule) &&
           (spine === null || constraint.spine === spine) &&
           text.includes(search.toLowerCase())
         );
       }),
-    [attempt, rule, spine, search],
+    [attempt, rule, spine, search, notation],
   );
   const currentPage = Math.min(page, Math.max(1, Math.ceil(filtered.length / 25)));
   return (
     <div className="inspector">
+      {notation === 'math' && <ConstraintNotation attempt={attempt} />}
       <div className="inspector-toolbar">
         <TextInput
           aria-label="Search constraints"
@@ -94,14 +186,15 @@ export function ConstraintExplorer({
       </div>
       <Group justify="space-between" mb="md">
         <span className="muted small">
-          {filtered.length} of {attempt.constraints.length} constraints
+          {filtered.length} of{' '}
+          {attempt.constraints.filter((value) => notation === 'smt' || value.formula !== null).length} constraints
         </span>
         <SegmentedControl
           size="xs"
           value={notation}
           onChange={setNotation}
           data={[
-            { value: 'math', label: 'Unicode' },
+            { value: 'math', label: 'Mathematics' },
             { value: 'smt', label: 'SMT-LIB' },
           ]}
         />
@@ -117,10 +210,19 @@ export function ConstraintExplorer({
                 </Badge>
                 {constraint.spine !== null && <span className="muted small">z{subscript(constraint.spine)}</span>}
               </Group>
-              <CopyButton text={notation === 'math' ? constraint.formula : constraint.smtlib} />
+              <CopyButton
+                text={
+                  notation === 'math'
+                    ? statementParts(constraint.formula)
+                        .map((part) => part.latex)
+                        .join(' \\Longrightarrow ')
+                    : constraint.smtlib
+                }
+                label={notation === 'math' ? 'Copy LaTeX' : 'Copy'}
+              />
             </Group>
             <p>{constraint.explanation}</p>
-            <pre>{notation === 'math' ? constraint.formula : constraint.smtlib}</pre>
+            {notation === 'math' ? <ConstraintFormula formula={constraint.formula} /> : <pre>{constraint.smtlib}</pre>}
           </article>
         ))}
         {filtered.length === 0 && (
@@ -201,7 +303,7 @@ export function ModelExplorer({ attempt }: { attempt: Attempt }) {
               {attempt.refinements.map((constraint) => (
                 <article className="constraint-card" key={constraint.id}>
                   <p>{constraint.explanation}</p>
-                  <pre>{constraint.formula}</pre>
+                  <ConstraintFormula formula={constraint.formula} />
                 </article>
               ))}
             </Accordion.Panel>

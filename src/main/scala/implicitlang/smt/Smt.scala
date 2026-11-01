@@ -14,11 +14,10 @@ object SmtSort {
   }
 }
 
-/** Immutable, sorted formulas with SMT-LIB transport and mathematical display renderings. */
+/** Immutable, sorted formulas with structural inspection and SMT-LIB transport. */
 sealed trait SmtExpr[A] {
   def sort: SmtSort[A]
   def smtlib: String
-  def math: String
 
   final def ===(other: SmtExpr[A]): SmtExpr[Boolean] = {
     require(sort == other.sort, "Equality operands must have the same SMT sort")
@@ -29,7 +28,6 @@ sealed trait SmtExpr[A] {
 final case class SmtConstant[A](name: String, sort: SmtSort[A]) extends SmtExpr[A] {
   require(Smt.validName(name), s"Invalid SMT constant name: $name")
   def smtlib: String = name
-  def math: String = name
   def declaration: String = s"(declare-const $name ${sort.name})"
 }
 
@@ -75,28 +73,11 @@ final case class SmtDefinition[A](function: SmtFunction[A], parameters: Vector[S
 object Smt {
   private[smt] def validName(value: String): Boolean = value.matches("[A-Za-z_][A-Za-z0-9_]*")
 
-  private final case class Application[A](operator: String, sort: SmtSort[A], arguments: Vector[SmtExpr[?]])
-      extends SmtExpr[A] {
+  final case class Application[A] private[smt] (
+    operator: String, sort: SmtSort[A], arguments: Vector[SmtExpr[?]]
+  ) extends SmtExpr[A] {
     def smtlib: String = {
       if arguments.isEmpty then operator else (operator +: arguments.map(_.smtlib)).mkString("(", " ", ")")
-    }
-
-    def math: String = {
-      val operands = arguments.map(_.math)
-      operator match {
-        case "and" => operands.mkString("(", " ∧ ", ")")
-        case "or" => operands.mkString("(", " ∨ ", ")")
-        case "not" => s"¬${operands.head}"
-        case "=>" => operands.mkString("(", " ⇒ ", ")")
-        case "=" => operands.mkString("(", " = ", ")")
-        case "<=" => operands.mkString("(", " ≤ ", ")")
-        case ">=" => operands.mkString("(", " ≥ ", ")")
-        case "-" if operands.size == 1 => s"−${operands.head}"
-        case "+" | "-" | "<" | ">" => operands.mkString("(", s" $operator ", ")")
-        case "ite" => s"if ${operands(0)} then ${operands(1)} else ${operands(2)}"
-        case _ if operands.isEmpty => operator
-        case _ => operands.mkString(s"$operator(", ", ", ")")
-      }
     }
   }
 
@@ -104,22 +85,28 @@ object Smt {
     Application(operator, sort, arguments)
   }
 
-  private final case class ConstructorTest[A](constructor: SmtConstructor[A], value: SmtExpr[A])
+  final case class ConstructorTest[A] private[smt] (constructor: SmtConstructor[A], value: SmtExpr[A])
       extends SmtExpr[Boolean] {
     val sort: SmtSort[Boolean] = SmtSort.Bool
     def smtlib: String = s"((_ is ${constructor.name}) ${value.smtlib})"
-    def math: String = s"is${constructor.name}(${value.math})"
+  }
+
+  final case class BooleanLiteral(value: Boolean) extends SmtExpr[Boolean] {
+    val sort: SmtSort[Boolean] = SmtSort.Bool
+    def smtlib: String = value.toString
+  }
+
+  final case class IntegerLiteral(value: BigInt) extends SmtExpr[BigInt] {
+    val sort: SmtSort[BigInt] = SmtSort.Int
+    def smtlib: String = if value < 0 then s"(- ${-value})" else value.toString
   }
 
   private[smt] def constructorTest[A](constructor: SmtConstructor[A], value: SmtExpr[A]): SmtExpr[Boolean] = {
     ConstructorTest(constructor, value)
   }
 
-  def bool(value: Boolean): SmtExpr[Boolean] = Application(value.toString, SmtSort.Bool, Vector.empty)
-  def int(value: BigInt): SmtExpr[BigInt] = {
-    if value < 0 then Application("-", SmtSort.Int, Vector(int(-value)))
-    else Application(value.toString, SmtSort.Int, Vector.empty)
-  }
+  def bool(value: Boolean): SmtExpr[Boolean] = BooleanLiteral(value)
+  def int(value: BigInt): SmtExpr[BigInt] = IntegerLiteral(value)
 
   def all(values: Iterable[SmtExpr[Boolean]]): SmtExpr[Boolean] = {
     if values.isEmpty then bool(true) else Application("and", SmtSort.Bool, values.toVector)

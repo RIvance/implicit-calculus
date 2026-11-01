@@ -5,6 +5,7 @@ import { App } from './App';
 import { examples } from './examples';
 import { readDraft, sharedDocument } from './document';
 import '@mantine/core/styles.css';
+import 'katex/dist/katex.min.css';
 import './styles.css';
 
 const theme = createTheme({

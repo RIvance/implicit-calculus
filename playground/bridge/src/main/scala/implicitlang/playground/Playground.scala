@@ -61,7 +61,7 @@ final class Runner(solver: SmtBrowserSolver) {
           emit(Presentation.obj("kind" -> "prepared", "analysis" -> Presentation.prepared(prepared)))
           emit(Presentation.obj("kind" -> "stage", "stage" -> "resolving"))
           def search(
-            current: SmtSearch, goalIndex: Int, goal: Type, deadline: Long
+            current: SmtSearch, goalIndex: Int, goal: Type, names: DisplayNames, deadline: Long
           ): Future[SynthesisReport] = current match {
             case SmtSearch.Finished(report) => Future.successful(report)
             case SmtSearch.Query(problem, _, previous, resume) => {
@@ -77,9 +77,9 @@ final class Runner(solver: SmtBrowserSolver) {
                   }
                   emit(Presentation.obj(
                     "kind" -> "attempt", "goalIndex" -> goalIndex,
-                    "attempt" -> Presentation.attempt(history.last, history.size - 1)
+                    "attempt" -> Presentation.attempt(history.last, history.size - 1, names)
                   ))
-                  search(next, goalIndex, goal, deadline)
+                  search(next, goalIndex, goal, names, deadline)
                 }
               }
             }
@@ -93,7 +93,7 @@ final class Runner(solver: SmtBrowserSolver) {
                   Future.successful(new NaiveSynthesizer().inspect(goal.tpe, goal.context))
                 } else {
                   val deadline = System.nanoTime() + limits.timeoutMillis.toLong * 1000000
-                  search(SmtSearch.start(goal.tpe, goal.context, limits), goalIndex, goal.tpe, deadline)
+                  search(SmtSearch.start(goal.tpe, goal.context, limits), goalIndex, goal.tpe, goal.names, deadline)
                 }
                 evidence.flatMap { report =>
                   emit(Presentation.obj(
@@ -232,13 +232,26 @@ private object Presentation {
     }.toJSArray
   )
 
-  private def constraint(value: SmtConstraint[ConstraintOrigin], index: Int): js.Object = obj(
-    "id" -> index, "rule" -> value.origin.rule.toString, "explanation" -> value.origin.explanation,
-    "spine" -> value.origin.spine.fold[js.Any](null)(index => index),
-    "formula" -> value.formula.math, "smtlib" -> value.formula.smtlib
-  )
+  private def constraint(
+    value: SmtConstraint[ConstraintOrigin], index: Int, notation: ConstraintNotation
+  ): js.Object = {
+    obj(
+      "id" -> index, "rule" -> value.origin.rule.toString, "explanation" -> value.origin.explanation,
+      "spine" -> value.origin.spine.fold[js.Any](null)(index => index),
+      "formula" -> notation(value.formula).fold[js.Any](null) { statement =>
+        obj(
+          "premise" -> statement.premise.fold[js.Any](null)(formula),
+          "conclusion" -> formula(statement.conclusion)
+        )
+      },
+      "smtlib" -> value.formula.smtlib
+    )
+  }
 
-  def attempt(value: SynthesisAttempt, index: Int): js.Object = {
+  private def formula(value: ConstraintNotation.Formula): js.Object = obj("text" -> value.text, "latex" -> value.latex)
+
+  def attempt(value: SynthesisAttempt, index: Int, names: DisplayNames): js.Object = {
+    val notation = new ConstraintNotation(value, names)
     val (status, model, reason, elapsed, statistics) = value.response match {
       case Result.Err(error) => ("error", None, Option(error.cause.getMessage), 0.0, Map.empty[String, String])
       case Result.Ok(response) => response.answer match {
@@ -250,10 +263,15 @@ private object Presentation {
     obj(
       "index" -> index, "spineCount" -> value.spineCount, "status" -> status, "elapsedMillis" -> elapsed,
       "recordLabels" -> value.recordLabels.toJSArray,
+      "assumptions" -> notation.assumptions.map(formula).toJSArray,
       "accepted" -> (status == "sat" && value.refinements.isEmpty),
       "reason" -> reason.fold[js.Any](null)(value => value),
-      "constraints" -> value.problem.constraints.zipWithIndex.map(constraint).toJSArray,
-      "refinements" -> value.refinements.zipWithIndex.map(constraint).toJSArray,
+      "constraints" -> value.problem.constraints.zipWithIndex.map { (value, index) =>
+        constraint(value, index, notation)
+      }.toJSArray,
+      "refinements" -> value.refinements.zipWithIndex.map { (value, index) =>
+        constraint(value, index, notation)
+      }.toJSArray,
       "smtlib" -> value.problem.smtlib(value.timeoutMillis, model.nonEmpty),
       "model" -> model.fold[js.Any](null) { model =>
         obj(
@@ -285,7 +303,7 @@ private object Presentation {
       case Result.Err(error) => diagnostic(error, names)
       case _ => null
     }),
-    "attempts" -> value.attempts.zipWithIndex.map(attempt).toJSArray,
+    "attempts" -> value.attempts.zipWithIndex.map((value, index) => attempt(value, index, names)).toJSArray,
     "evidence" -> value.evidence.fold[js.Any](null) { program =>
       obj(
         "cost" -> program.cost,

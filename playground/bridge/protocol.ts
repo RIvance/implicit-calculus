@@ -45,12 +45,17 @@ export interface Goal {
   ordinary: { name: string; type: string }[];
 }
 
+export interface MathFormula {
+  text: string;
+  latex: string;
+}
+
 export interface Constraint {
   id: number;
   rule: string;
   explanation: string;
   spine: number | null;
-  formula: string;
+  formula: { premise: MathFormula | null; conclusion: MathFormula } | null;
   smtlib: string;
 }
 
@@ -63,6 +68,7 @@ export interface Attempt {
   index: number;
   spineCount: number;
   recordLabels: string[];
+  assumptions: MathFormula[];
   status: 'sat' | 'unsat' | 'unknown' | 'error';
   elapsedMillis: number;
   accepted: boolean;

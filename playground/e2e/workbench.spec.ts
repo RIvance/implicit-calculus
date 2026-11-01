@@ -295,6 +295,54 @@ test('real synthesis supports graph, constraint, model, trace, and export inspec
   expect(errors).toEqual([]);
 });
 
+test('constraints typeset quantified types and indexed names while retaining copyable SMT-LIB', async ({
+  page,
+  context,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('./');
+  await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();
+  await edit(
+    page,
+    `instance seed: Int = 73
+instance lift[A, B](implicit input: A): { call_with: B -> A } = { call_with = (value: B) => input }
+summon[{ call_with: String -> Int }].call_with("hello")`,
+  );
+  await page.getByRole('button', { name: 'Run program' }).click();
+  await expect(page.getByTestId('program-value')).toHaveText('73');
+  await page.getByRole('tab', { name: 'Constraints', exact: true }).click();
+  await expect(page.locator('.constraint-symbols .katex-html').first()).toContainText('τ');
+  await page.getByRole('textbox', { name: 'Search constraints' }).fill('call_with');
+  const quantified = page
+    .locator('.constraint-card')
+    .filter({
+      has: page.locator('annotation').filter({ hasText: '\\forall \\mathit{A}.\\, \\forall \\mathit{A}_{1}' }),
+    })
+    .first();
+  // MathML retains the formula's structure for assistive readers, including genuine subscripts.
+  await expect(quantified.locator('math msub')).not.toHaveCount(0);
+  await quantified.getByRole('button', { name: 'Copy LaTeX', exact: true }).click();
+  const latex = await page.evaluate(() => navigator.clipboard.readText());
+  expect(latex).toContain('\\forall \\mathit{A}_{1}');
+  expect(latex).toContain('\\mathtt{call\\_with}');
+  expect(latex).toContain('\\mathtt{lift}');
+  expect(latex).toContain('\\tau_{0}');
+  expect(latex).not.toContain('root');
+  expect(latex).not.toMatch(/\b(?:Forall|Record|Arrow|Variable)\(/);
+  await page.getByText('SMT-LIB', { exact: true }).click();
+  const encoded = page.locator('.constraint-card').filter({ hasText: '(Forall (Forall (Implicit' }).first();
+  await expect(encoded.locator('pre')).toContainText('(Record (Field');
+  await encoded.getByRole('button', { name: 'Copy', exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('(Forall (Forall (Implicit');
+  await page.getByText('Mathematics', { exact: true }).click();
+  await expect(quantified.getByText('When', { exact: true })).toBeVisible();
+  await expect(quantified.locator('.katex')).toHaveCount(2);
+  await page.screenshot({ path: '.cache/screenshots/mathematical-constraints.png', fullPage: true });
+  expect(errors).toEqual([]);
+});
+
 test('editing, sharing, diagnostics, and cancellation use the current source', async ({ page, context }) => {
   await page.goto('./');
   await expect(page.getByText('Z3 backend ready', { exact: true })).toBeVisible();

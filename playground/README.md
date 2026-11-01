@@ -40,8 +40,9 @@ browser loads these assets from the same host as the site.
 - Select each synthesis goal and inspect its lexical Δ, surrounding Γ, and rigid type variables.
   Select a graph node to inspect the instance head, inferred type arguments, implicit dependencies,
   and corresponding constraints. Pan, zoom, and use the minimap to navigate larger constructions.
-- Filter actual constraints by rule, spine, or text. Switch between Unicode and SMT-LIB and
-  export a complete solver query, including datatype declarations and recursive definitions.
+- Filter actual constraints by rule, spine, or text. Typeset formulas use quantified types, arrows,
+  named record fields, and indexed solver variables. Copy LaTeX, switch to SMT-LIB, or export a
+  complete solver query, including datatype declarations and recursive definitions.
 - Inspect structured assignments or the raw model. The model view identifies the record-label
   encoding and any additional type-validity constraints required by a provisional candidate.
 - Step through or play back search attempts, inspect solver statistics, and adjust construction

@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createRunner, analyze } from '@implicit/compiler';
+import { renderToString } from 'katex';
 import { examples } from './examples';
-import type { Runner } from '../bridge/protocol';
+import type { Constraint, MathFormula, Runner } from '../bridge/protocol';
 import { documentGoals, sameGoal, termText } from './term-document';
 
 let runner: Runner;
+function formulas(constraint: Constraint): MathFormula[] {
+  const statement = constraint.formula;
+  return statement ? (statement.premise ? [statement.premise, statement.conclusion] : [statement.conclusion]) : [];
+}
 beforeAll(async () => {
   runner = await createRunner();
 });
@@ -28,6 +33,17 @@ describe('Scala.js compiler with WebAssembly synthesis', () => {
         const marker = markers.find((marker) => sameGoal(marker.location, goal.request.location));
         expect(marker).toBeDefined();
         expect(termText(marker!.annotation, Infinity)).toBe(goal.request.type);
+        for (const attempt of goal.synthesis.attempts) {
+          expect(attempt.constraints.filter((value) => value.rule === 'Goal' && value.formula)).toHaveLength(1);
+          expect(attempt.assumptions).toHaveLength(1);
+          for (const constraint of [...attempt.constraints, ...attempt.refinements]) {
+            for (const formula of formulas(constraint)) {
+              expect(formula.text).not.toMatch(/\b(?:Forall|Record|Arrow|Implicit|Variable|Field|Empty)\(/);
+              expect(formula.text).not.toMatch(/\b(?:type_argument|implicit_argument|well_formed)\(/);
+              expect(() => renderToString(formula.latex, { strict: 'error', trust: false })).not.toThrow();
+            }
+          }
+        }
       }
     });
   }
@@ -52,6 +68,65 @@ summon[{ item: Int }]`;
     expect(result.goals![0].validated).toBe(true);
     const baseline = await runner.run(source, 4, 4, 10_000, 'exact', true, () => {});
     expect(baseline.diagnostic?.code).toBe('MissingInstance');
+  });
+
+  test('constraint notation retains quantified scope, named fields, and symbolic type arguments', async () => {
+    const result = await runner.run(
+      `instance seed: Int = 73
+instance lift[A, B](implicit input: A): { call_with: B -> A } = { call_with = (value: B) => input }
+summon[{ call_with: String -> Int }].call_with("hello")`,
+      6,
+      4,
+      10_000,
+      'smt',
+      true,
+      () => {},
+    );
+    expect(result.value).toBe('73');
+    const constraints = result.goals![0].synthesis.attempts.at(-1)!.constraints;
+    const text = constraints
+      .flatMap(formulas)
+      .map((value) => value.text)
+      .join('\n');
+    const latex = constraints
+      .flatMap(formulas)
+      .map((value) => value.latex)
+      .join('\n');
+    expect(text).toContain('∀A. ∀A₁. A ⇒ {call_with: A₁ → A}');
+    expect(text).toContain('τ₀ = ∀A. B₀,₀ ⇒ {call_with: A → B₀,₀}');
+    expect(text).toContain('h₀ = lift ∧ ℓ₀ = 1');
+    expect(text).toContain('h₀ ∈ Δ ∧ 0 ≤ ℓ₀ < 6');
+    expect(latex).toContain('B_{0,0}');
+    expect(latex).toContain('\\tau_{0}');
+    expect(latex).toContain('\\mathtt{call\\_with}');
+    expect(latex).toContain('\\mathit{A}_{1}');
+    expect(latex).toContain('\\Rightarrow');
+    expect(constraints.some((value) => value.formula === null)).toBe(true);
+    expect(result.goals![0].synthesis.attempts.at(-1)!.assumptions).toEqual([{ text: 'r = 1', latex: 'r = 1' }]);
+    expect(constraints.some((value) => value.smtlib.includes('(Forall (Forall (Implicit'))).toBe(true);
+  });
+
+  test('constraint notation preserves ambient type names across streamed and completed reports', async () => {
+    const streamed: string[] = [];
+    const result = await runner.run(
+      `instance pack[A](implicit input: A): { item: A } = { item = input }
+def wrapped[User](implicit input: User): { item: User } = summon[{ item: User }]
+wrapped`,
+      4,
+      4,
+      10_000,
+      'smt',
+      false,
+      (event) => {
+        if (event.kind === 'attempt')
+          streamed.push(...event.attempt.constraints.flatMap(formulas).map((value) => value.latex));
+      },
+    );
+    expect(result.ok).toBe(true);
+    const constraints = result.goals![0].synthesis.attempts.flatMap((attempt) => attempt.constraints);
+    expect(constraints.flatMap(formulas).map((value) => value.latex)).toEqual(streamed);
+    expect(constraints.flatMap(formulas).some((value) => value.text.includes('{item: User}'))).toBe(true);
+    expect(constraints.flatMap(formulas).every((value) => !value.text.includes('^'))).toBe(true);
   });
 
   test('unresolved goals retain binder names and remain distinct across identical expected types', async () => {
