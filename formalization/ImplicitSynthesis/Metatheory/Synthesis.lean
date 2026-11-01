@@ -1,10 +1,47 @@
 import ImplicitSynthesis.Synthesis
 import ImplicitSynthesis.Metatheory.Resolution
+import ImplicitSynthesis.Metatheory.SMT
 
 /-! Soundness and completeness of the shared-program constraint model. -/
 
 namespace ImplicitSynthesis
 namespace Synthesis
+
+theorem DecodeSteps.deterministic {ps p κ r₁ r₂}
+  (h₁ : DecodeSteps ps p κ r₁) (h₂ : DecodeSteps ps p κ r₂) : r₁ = r₂
+:= by {
+  induction h₁ generalizing r₂ with
+  | nil => cases h₂; rfl
+  | type _ ih => cases h₂ with
+    | type h₂ => exact congrArg (fun r => Evidence.typeApp r _) (ih h₂)
+  | «instance» _ hk ih => cases h₂ with
+    | «instance» h₂ hk₂ => exact congr (congrArg Evidence.implicitApp (ih h₂)) (hk.unique hk₂)
+}
+
+theorem DecodeSpine.deterministic {ps s p₁ p₂}
+  (h₁ : DecodeSpine ps s p₁) (h₂ : DecodeSpine ps s p₂) : p₁ = p₂
+:= by {
+  cases h₁ with
+  | intro h₁ => cases h₂ with
+    | intro h₂ => exact h₁.deterministic h₂
+}
+
+theorem DecodeProgram.deterministic {π ps₁ ps₂}
+  (h₁ : DecodeProgram π ps₁) (h₂ : DecodeProgram π ps₂) : ps₁ = ps₂
+:= by {
+  induction h₁ generalizing ps₂ with
+  | nil => cases h₂; rfl
+  | cons _ hs ih => cases h₂ with
+    | cons h₂ hs₂ => cases ih h₂; exact congrArg (fun p => p :: _) (hs.deterministic hs₂)
+}
+
+theorem Projects.unique {μ κ₁ κ₂} (h₁ : Projects μ κ₁) (h₂ : Projects μ κ₂) : κ₁ = κ₂ := by {
+  rcases h₁ with ⟨ps₁, p₁, hd₁, hp₁, hκ₁⟩
+  rcases h₂ with ⟨ps₂, p₂, hd₂, hp₂, hκ₂⟩
+  cases hd₁.deterministic hd₂
+  cases hp₁.unique hp₂
+  exact hκ₁.symm.trans hκ₂
+}
 
 theorem ProgramTyping.decode {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U) : DecodeProgram π ps := by {
   induction h with
@@ -203,6 +240,64 @@ theorem satCoreTyping [SMT.Oracle Query Model Holds] {φ μ δ H}
   rcases satSound h with ⟨ps, p, hd, hp, ht⟩
   rcases LowerEvidence.total δ p with ⟨t, hl⟩
   exact ⟨ps, p, t, hd, hp, hl, hl.preservesTyping ht hδ⟩
+}
+
+theorem BoundedEvidence.model {φ p} (h : BoundedEvidence φ p) :
+  ∃ μ, Holds φ μ ∧ Projects μ p.shape
+:= by {
+  rcases h with ⟨π, ps, U, hπ, hp, hG, hN⟩
+  rcases hπ.complete with ⟨Τ, hΤ⟩
+  exact ⟨⟨π, Τ, U⟩, ⟨hΤ, hG, hN⟩, ps, p, hπ.decode, hp, rfl⟩
+}
+
+theorem Holds.projectedEvidence {φ μ κ} (h : Holds φ μ) (hκ : Projects μ κ) :
+  ∃ p, BoundedEvidence φ p ∧ p.shape = κ
+:= by {
+  rcases hκ with ⟨ps, p, hd, hp, hκ⟩
+  rcases h.witness with ⟨ps', U, hπ, hG, hN⟩
+  cases hd.deterministic hπ.decode
+  exact ⟨p, ⟨μ.program, ps, U, hπ, hp, hG, hN⟩, hκ⟩
+}
+
+theorem ambiguitySat
+  [SMT.Oracle (SMT.Selection Query EvidenceShape) Model (SMT.SelectedHolds Holds Projects)] {φ p₀ μ}
+  (h₀ : BoundedEvidence φ p₀)
+  (h : SMT.Oracle.Responds (SMT.SelectedHolds Holds Projects) (.different φ p₀.shape) (.sat μ)) :
+  ∃ p r, BoundedEvidence φ p ∧ BoundedEvidence φ r ∧ p.shape ≠ r.shape
+:= by {
+  rcases SMT.differentSat h with ⟨hμ, κ', hκ, hne⟩
+  rcases hμ.projectedEvidence hκ with ⟨p, hp, heq⟩
+  exact ⟨p, p₀, hp, h₀, fun h => hne (heq.symm.trans h)⟩
+}
+
+theorem ambiguityUnsat
+  [SMT.Oracle (SMT.Selection Query EvidenceShape) Model (SMT.SelectedHolds Holds Projects)] {φ p₀}
+  (h₀ : BoundedEvidence φ p₀)
+  (h : SMT.Oracle.Responds (SMT.SelectedHolds Holds Projects) (.different φ p₀.shape) .unsat) :
+  (∃ p, BoundedEvidence φ p) ∧ ∀ p, BoundedEvidence φ p → p.shape = p₀.shape
+:= by {
+  refine ⟨⟨p₀, h₀⟩, ?_⟩
+  intro p hp
+  rcases hp.model with ⟨μ, hμ, hκ⟩
+  exact SMT.differentUnsat h μ p.shape hμ hκ
+}
+
+theorem OracleSearch.sound [SMT.Oracle Query Model Holds] {N H q Δ A p}
+  (h : OracleSearch N H q Δ A p) : q ∣ Δ ⊢ᵉ p ∶ A
+:= by {
+  rcases h with ⟨μ, ps, hs, hd, hp⟩
+  rcases satSound hs with ⟨ps', p', hd', hp', ht⟩
+  cases hd.deterministic hd'
+  cases hp.unique hp'
+  exact ht
+}
+
+theorem OracleSearch.resolvesNeed [SMT.Oracle Query Model Holds] {N H q Δ A p γ δ Γ}
+  (h : OracleSearch N H q Δ A p) (hδ : Embeds δ Δ Γ) :
+  ∃ t, OracleSearch N H ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .need A ⇝ t ∧ (q ∣ Γ ⊢ᶜ t ∶ A.erase)
+:= by {
+  rcases LowerEvidence.total δ p with ⟨t, ht⟩
+  exact ⟨t, .need h h.sound ht, ht.preservesTyping h.sound hδ⟩
 }
 
 end Synthesis

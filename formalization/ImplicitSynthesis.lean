@@ -5,5 +5,6 @@ import ImplicitSynthesis.Typing
 import ImplicitSynthesis.Resolution
 import ImplicitSynthesis.Metatheory.Types
 import ImplicitSynthesis.Metatheory.Resolution
-
 import ImplicitSynthesis.Metatheory.Synthesis
+import ImplicitSynthesis.Metatheory.SMT
+import ImplicitSynthesis.Examples

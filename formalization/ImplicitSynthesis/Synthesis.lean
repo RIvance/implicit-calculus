@@ -1,4 +1,4 @@
-import ImplicitSynthesis.Typing
+import ImplicitSynthesis.Resolution
 import ImplicitSynthesis.SMT
 
 /-!
@@ -186,6 +186,17 @@ def Holds (φ : Query) (μ : Model) : Prop :=
 def Witness (φ : Query) (π : Program) : Prop :=
   ∃ ps U, ProgramTyping φ.depth (Valid φ.depth φ.heightBound) φ.instances π ps U ∧
     Lookup U 0 φ.goal ∧ cost π ≤ φ.costBound
+
+def BoundedEvidence (φ : Query) (p : Evidence) : Prop :=
+  ∃ π ps U, ProgramTyping φ.depth (Valid φ.depth φ.heightBound) φ.instances π ps U ∧
+    Lookup ps 0 p ∧ Lookup U 0 φ.goal ∧ cost π ≤ φ.costBound
+
+def Projects (μ : Model) (κ : EvidenceShape) : Prop :=
+  ∃ ps p, DecodeProgram μ.program ps ∧ Lookup ps 0 p ∧ p.shape = κ
+
+def OracleSearch (N H : Nat) [SMT.Oracle Query Model Holds] : Search := fun q Δ A p =>
+  ∃ μ ps, SMT.Oracle.Responds Holds ⟨q, Δ, A, N, H⟩ (.sat μ) ∧
+    DecodeProgram μ.program ps ∧ Lookup ps 0 p
 
 end Synthesis
 end ImplicitSynthesis

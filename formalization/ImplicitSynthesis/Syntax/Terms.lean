@@ -10,6 +10,17 @@ inductive Evidence where
   | implicitApp (p q : Evidence)
   deriving Repr
 
+inductive EvidenceShape where
+  | ref (d : Nat)
+  | typeApp (p : EvidenceShape)
+  | implicitApp (p r : EvidenceShape)
+  deriving DecidableEq
+
+def Evidence.shape : Evidence → EvidenceShape
+  | .ref d => .ref d
+  | .typeApp p _ => .typeApp p.shape
+  | .implicitApp p r => .implicitApp p.shape r.shape
+
 inductive ImplicitTerm where
   | var (x : Nat)
   | instance (d : Nat)

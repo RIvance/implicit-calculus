@@ -4,6 +4,67 @@ import ImplicitSynthesis.Typing
 
 namespace ImplicitSynthesis
 
+/-- A canonical row contains at most one type at any label. -/
+theorem Canonical.uniqueField {R : List (Label × α)} (h : Canonical R)
+  {ℓ A B} (hA : (ℓ, A) ∈ R) (hB : (ℓ, B) ∈ R) : A = B
+:= by {
+  induction h with
+  | nil => cases hA
+  | cons hlt _ ih => cases hA with
+    | head => cases hB with
+      | head => rfl
+      | tail _ hB => exact False.elim (Nat.lt_irrefl ℓ (hlt _ hB))
+    | tail _ hA => cases hB with
+      | head => exact False.elim (Nat.lt_irrefl ℓ (hlt _ hA))
+      | tail _ hB => exact ih hA hB
+}
+
+/-- Canonical rows with the same fields are equal as representations. -/
+theorem Canonical.ext {R S : List (Label × α)} (hR : Canonical R) (hS : Canonical S)
+  (hRS : ∀ a, a ∈ R ↔ a ∈ S) : R = S
+:= by {
+  induction R generalizing S with
+  | nil => cases S with
+    | nil => rfl
+    | cons s S => cases (hRS s).mpr (List.Mem.head ..)
+  | cons r R ih =>
+    {
+      cases S with
+      | nil => cases (hRS r).mp (List.Mem.head ..)
+      | cons s S =>
+        {
+          cases hR with
+          | cons hltR hR => cases hS with
+            | cons hltS hS =>
+              {
+                have hr := (hRS r).mp (List.Mem.head ..)
+                cases hr with
+                | head =>
+                  {
+                    apply congrArg (List.cons r)
+                    apply ih hR hS
+                    intro a
+                    constructor
+                    · intro ha
+                      cases (hRS a).mp (List.Mem.tail _ ha) with
+                      | head => exact False.elim (Nat.lt_irrefl r.1 (hltR _ ha))
+                      | tail _ ha => exact ha
+                    · intro ha
+                      cases (hRS a).mpr (List.Mem.tail _ ha) with
+                      | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ ha))
+                      | tail _ ha => exact ha
+                  }
+                | tail _ hr =>
+                  {
+                    cases (hRS s).mpr (List.Mem.head ..) with
+                    | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ hr))
+                    | tail _ hs => exact False.elim (Nat.lt_irrefl r.1 (Nat.lt_trans (hltR _ hs) (hltS _ hr)))
+                  }
+              }
+        }
+    }
+}
+
 namespace ImplicitType
 
 mutual
