@@ -1,4 +1,4 @@
-import Std
+import ImplicitSynthesis.Prelude
 
 /-!
 Types use de Bruijn indices. A well-formed record type stores its finite map

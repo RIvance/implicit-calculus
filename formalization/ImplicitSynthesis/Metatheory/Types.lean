@@ -5,7 +5,7 @@ import ImplicitSynthesis.Typing
 namespace ImplicitSynthesis
 
 /-- A canonical row contains at most one type at any label. -/
-theorem Canonical.uniqueField {R : List (Label × α)} (h : Canonical R)
+lemma Canonical.uniqueField {R : List (Label × α)} (h : Canonical R)
   {ℓ A B} (hA : (ℓ, A) ∈ R) (hB : (ℓ, B) ∈ R) : A = B
 := by {
   induction h with
@@ -34,33 +34,32 @@ theorem Canonical.ext {R S : List (Label × α)} (hR : Canonical R) (hS : Canoni
       | cons s S =>
         {
           cases hR with
-          | cons hltR hR => cases hS with
-            | cons hltS hS =>
-              {
-                have hr := (hRS r).mp (List.Mem.head ..)
-                cases hr with
-                | head =>
-                  {
-                    apply congrArg (List.cons r)
-                    apply ih hR hS
-                    intro a
-                    constructor
-                    · intro ha
-                      cases (hRS a).mp (List.Mem.tail _ ha) with
-                      | head => exact False.elim (Nat.lt_irrefl r.1 (hltR _ ha))
-                      | tail _ ha => exact ha
-                    · intro ha
-                      cases (hRS a).mpr (List.Mem.tail _ ha) with
-                      | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ ha))
-                      | tail _ ha => exact ha
-                  }
-                | tail _ hr =>
-                  {
-                    cases (hRS s).mpr (List.Mem.head ..) with
-                    | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ hr))
-                    | tail _ hs => exact False.elim (Nat.lt_irrefl r.1 (Nat.lt_trans (hltR _ hs) (hltS _ hr)))
-                  }
-              }
+          | cons hltR hR => cases hS with | cons hltS hS =>
+            {
+              have hr := (hRS r).mp (List.Mem.head ..)
+              cases hr with
+              | head =>
+                {
+                  apply congrArg (List.cons r)
+                  apply ih hR hS
+                  intro a
+                  constructor
+                  · intro ha
+                    cases (hRS a).mp (List.Mem.tail _ ha) with
+                    | head => exact False.elim (Nat.lt_irrefl r.1 (hltR _ ha))
+                    | tail _ ha => exact ha
+                  · intro ha
+                    cases (hRS a).mpr (List.Mem.tail _ ha) with
+                    | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ ha))
+                    | tail _ ha => exact ha
+                }
+              | tail _ hr =>
+                {
+                  cases (hRS s).mpr (List.Mem.head ..) with
+                  | head => exact False.elim (Nat.lt_irrefl r.1 (hltS _ hr))
+                  | tail _ hs => exact False.elim (Nat.lt_irrefl r.1 (Nat.lt_trans (hltR _ hs) (hltS _ hr)))
+                }
+            }
         }
     }
 }
@@ -69,7 +68,7 @@ namespace ImplicitType
 
 mutual
 
-theorem eraseRename (A : ImplicitType) (ρ : Nat → Nat) :
+lemma eraseRename (A : ImplicitType) (ρ : Nat → Nat) :
   (A.rename ρ).erase = A.erase.rename ρ
 := by {
   cases A with
@@ -81,7 +80,7 @@ theorem eraseRename (A : ImplicitType) (ρ : Nat → Nat) :
   | record R => exact congrArg CoreType.record (eraseRenameFields R ρ)
 }
 
-theorem eraseRenameFields (R : List (Label × ImplicitType)) (ρ : Nat → Nat) :
+lemma eraseRenameFields (R : List (Label × ImplicitType)) (ρ : Nat → Nat) :
   eraseFields (renameFields ρ R) = CoreType.renameFields ρ (eraseFields R)
 := by {
   cases R with
@@ -89,8 +88,9 @@ theorem eraseRenameFields (R : List (Label × ImplicitType)) (ρ : Nat → Nat) 
   | cons r R =>
     {
       rcases r with ⟨ℓ, A⟩
-      change (ℓ, (A.rename ρ).erase) :: eraseFields (renameFields ρ R)
-        = (ℓ, A.erase.rename ρ) :: CoreType.renameFields ρ (eraseFields R)
+      change
+        (ℓ, (A.rename ρ).erase) :: eraseFields (renameFields ρ R) =
+        (ℓ, A.erase.rename ρ) :: CoreType.renameFields ρ (eraseFields R)
       rw [eraseRename A ρ, eraseRenameFields R ρ]
     }
 }
@@ -99,7 +99,7 @@ end
 
 mutual
 
-theorem eraseSubst (A : ImplicitType) (σ : Nat → ImplicitType) (τ : Nat → CoreType)
+lemma eraseSubst (A : ImplicitType) (σ : Nat → ImplicitType) (τ : Nat → CoreType)
   (h : ∀ α, (σ α).erase = τ α) :
   (A.subst σ).erase = A.erase.subst τ
 := by {
@@ -120,7 +120,7 @@ theorem eraseSubst (A : ImplicitType) (σ : Nat → ImplicitType) (τ : Nat → 
   | record R => exact congrArg CoreType.record (eraseSubstFields R σ τ h)
 }
 
-theorem eraseSubstFields (R : List (Label × ImplicitType)) (σ : Nat → ImplicitType) (τ : Nat → CoreType)
+lemma eraseSubstFields (R : List (Label × ImplicitType)) (σ : Nat → ImplicitType) (τ : Nat → CoreType)
   (h : ∀ α, (σ α).erase = τ α) :
   eraseFields (substFields σ R) = CoreType.substFields τ (eraseFields R)
 := by {
@@ -137,7 +137,7 @@ theorem eraseSubstFields (R : List (Label × ImplicitType)) (σ : Nat → Implic
 
 end
 
-theorem eraseInstantiate (A B : ImplicitType) :
+lemma eraseInstantiate (A B : ImplicitType) :
   (A.instantiate B).erase = A.erase.instantiate B.erase
 := by {
   apply eraseSubst
@@ -145,7 +145,7 @@ theorem eraseInstantiate (A B : ImplicitType) :
   cases α <;> rfl
 }
 
-theorem eraseFieldsMap (R : List (Label × ImplicitType)) :
+lemma eraseFieldsMap (R : List (Label × ImplicitType)) :
   eraseFields R = R.map (fun r => (r.1, r.2.erase))
 := by {
   induction R with
@@ -153,7 +153,7 @@ theorem eraseFieldsMap (R : List (Label × ImplicitType)) :
   | cons r R ih => cases r; exact congrArg (List.cons _) ih
 }
 
-theorem eraseFieldsLabels (R : List (Label × ImplicitType)) :
+lemma eraseFieldsLabels (R : List (Label × ImplicitType)) :
   (eraseFields R).map Prod.fst = R.map Prod.fst
 := by {
   induction R with
@@ -161,7 +161,7 @@ theorem eraseFieldsLabels (R : List (Label × ImplicitType)) :
   | cons r R ih => cases r; exact congrArg (List.cons _) ih
 }
 
-theorem memEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {A : ImplicitType}
+lemma memEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {A : ImplicitType}
   (h : (ℓ, A) ∈ R) : (ℓ, A.erase) ∈ eraseFields R
 := by {
   induction R with
@@ -175,7 +175,7 @@ theorem memEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {A : Imp
     }
 }
 
-theorem ofMemEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {T : CoreType}
+lemma ofMemEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {T : CoreType}
   (h : (ℓ, T) ∈ eraseFields R) : ∃ A, (ℓ, A) ∈ R ∧ A.erase = T
 := by {
   induction R with
@@ -195,7 +195,7 @@ theorem ofMemEraseFields {R : List (Label × ImplicitType)} {ℓ : Label} {T : C
 
 end ImplicitType
 
-theorem Canonical.eraseFields {R : List (Label × ImplicitType)} (h : Canonical R) :
+lemma Canonical.eraseFields {R : List (Label × ImplicitType)} (h : Canonical R) :
   Canonical (ImplicitType.eraseFields R)
 := by {
   induction R with
@@ -216,7 +216,7 @@ theorem Canonical.eraseFields {R : List (Label × ImplicitType)} (h : Canonical 
     }
 }
 
-theorem ImplicitWellFormed.erase {q : Nat} {A : ImplicitType} (h : q ⊢ⁱᵀ A) : q ⊢ᶜᵀ A.erase := by {
+lemma ImplicitWellFormed.erase {q : Nat} {A : ImplicitType} (h : q ⊢ⁱᵀ A) : q ⊢ᶜᵀ A.erase := by {
   induction h with
   | int => exact .int
   | var h => exact .var h

@@ -4,7 +4,7 @@ import ImplicitSynthesis.Typing
 
 namespace ImplicitSynthesis
 
-theorem Lookup.unique {Γ : List α} {x A B} (h₁ : Lookup Γ x A) (h₂ : Lookup Γ x B) : A = B := by {
+lemma Lookup.unique {Γ : List α} {x A B} (h₁ : Lookup Γ x A) (h₂ : Lookup Γ x B) : A = B := by {
   induction h₁ with
   | here => cases h₂; rfl
   | @there Γ x A C h ih =>
@@ -16,13 +16,13 @@ theorem Lookup.unique {Γ : List α} {x A B} (h₁ : Lookup Γ x A) (h₂ : Look
     }
 }
 
-theorem Lookup.map (f : α → β) {Γ x A} (h : Lookup Γ x A) : Lookup (Γ.map f) x (f A) := by {
+lemma Lookup.map (f : α → β) {Γ x A} (h : Lookup Γ x A) : Lookup (Γ.map f) x (f A) := by {
   induction h with
   | here => exact .here
   | there _ ih => exact .there ih
 }
 
-theorem Lookup.ofMap {f : α → β} {Γ x B} (h : Lookup (Γ.map f) x B) :
+lemma Lookup.ofMap {f : α → β} {Γ x B} (h : Lookup (Γ.map f) x B) :
   ∃ A, Lookup Γ x A ∧ f A = B
 := by {
   induction Γ generalizing x with
@@ -38,7 +38,7 @@ theorem Lookup.ofMap {f : α → β} {Γ x B} (h : Lookup (Γ.map f) x B) :
 
 namespace Lists
 
-theorem permMap (f : α → β) {R S : List α} (h : R.Perm S) : (R.map f).Perm (S.map f) := by {
+lemma permMap (f : α → β) {R S : List α} (h : R.Perm S) : (R.map f).Perm (S.map f) := by {
   induction h with
   | nil => exact .nil
   | cons a _ ih => exact .cons (f a) ih
@@ -46,7 +46,7 @@ theorem permMap (f : α → β) {R S : List α} (h : R.Perm S) : (R.map f).Perm 
   | trans _ _ ih₁ ih₂ => exact .trans ih₁ ih₂
 }
 
-theorem permMem {R S : List α} (h : R.Perm S) {a : α} (ha : a ∈ R) : a ∈ S := by {
+lemma permMem {R S : List α} (h : R.Perm S) {a : α} (ha : a ∈ R) : a ∈ S := by {
   induction h with
   | nil => exact ha
   | cons b _ ih => cases ha with

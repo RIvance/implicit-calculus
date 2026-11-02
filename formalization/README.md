@@ -12,11 +12,41 @@ lake build
 ```
 
 The project uses Lean's standard library and has no external package
-dependencies. The default build also checks the example derivations and runs
-[the axiom audit](Audit.lean). The audit discovers imported project declarations
-with source locations and checks their transitive dependencies, including the
+dependencies. The default build runs [the axiom audit](Audit.lean). The audit
+discovers imported project declarations with source locations and checks their
+transitive dependencies, including the
 types and proofs of theorems. Any axiom dependency, including `sorryAx`,
 `propext`, or choice, fails the build.
+
+Check the worked examples separately:
+
+```sh
+lake env lean Example/Examples.lean
+```
+
+## Reading the proofs
+
+Supporting results use `lemma`; the main mathematical properties use `theorem`.
+[Term and type notation](ImplicitSynthesis/Notation.lean) is scoped to
+`ImplicitSynthesis` and shared by the implicit and core calculi. The expected
+type selects the corresponding syntax.
+
+| Notation | Meaning |
+| --- | --- |
+| `ℤ`, `#α` | Integer type and indexed type variable |
+| `A ⟶ B`, `A ⇒ B` | Ordinary and implicit function types |
+| `∀. A` | Universal type |
+| `$[x]`, `ι[d]`, `⌜n⌝` | Ordinary variable or evidence reference, implicit variable, integer literal |
+| `λ[A]. c`, `λ⟨A⟩. c`, `Λ. c` | Ordinary, implicit, and type abstraction |
+| `c ⋅ u`, `c⟨u⟩`, `c⟦A⟧` | Ordinary, implicit, and type application |
+| `{R}`, `c.[ℓ]` | Record type or term, and field projection |
+| `let[A] c₁ in c₂`, `let t₁ in t₂` | Implicit-calculus and core-calculus let terms |
+| `instance[A] c₁ in c₂`, `?[A]` | Instance let and evidence request |
+| `fix[A]. c` | Fixpoint |
+
+Index zero refers to the nearest binder of the corresponding kind. For
+example, polymorphic identity is `Λ. λ[#0]. $[0]`, with type `∀. #0 ⟶ #0`.
+The comments accompanying rules and examples use named binders.
 
 ## Calculi and records
 
@@ -114,7 +144,7 @@ of dictionary implementations.
 
 ## Examples and scope
 
-[The example derivations](ImplicitSynthesis/Examples.lean) cover polymorphic
+[The example derivations](Example/Examples.lean) cover polymorphic
 identity, capture-avoiding instantiation, both kinds of variable crossing a
 binder, local instance selection, record reordering, unrestricted fixpoints,
 a polymorphic synthesized witness, two competing instances, and the exclusion

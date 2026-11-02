@@ -22,17 +22,17 @@ inductive LowerEvidence : (Nat → Nat) → Evidence → CoreTerm → Prop where
 
   -- ───────────────── E-Ref
   -- δ ⊢ d ⇝ δ(d)
-  | ref : δ ⊢ .ref d ⇝ᵉ .var (δ d)
+  | ref : δ ⊢ $[d] ⇝ᵉ $[δ d]
 
   -- δ ⊢ p ⇝ t
   -- ───────────────────────── E-Type-App
   -- δ ⊢ p[A] ⇝ t[|A|]
-  | typeApp : (δ ⊢ p ⇝ᵉ t) → δ ⊢ .typeApp p A ⇝ᵉ .typeApp t A.erase
+  | typeApp : (δ ⊢ p ⇝ᵉ t) → δ ⊢ p⟦A⟧ ⇝ᵉ t⟦A.erase⟧
 
   -- δ ⊢ p ⇝ t₁    δ ⊢ r ⇝ t₂
   -- ───────────────────────── E-Implicit-App
   -- δ ⊢ p⟨r⟩ ⇝ t₁ t₂
-  | implicitApp : (δ ⊢ p ⇝ᵉ t₁) → (δ ⊢ r ⇝ᵉ t₂) → δ ⊢ .implicitApp p r ⇝ᵉ .app t₁ t₂
+  | implicitApp : (δ ⊢ p ⇝ᵉ t₁) → (δ ⊢ r ⇝ᵉ t₂) → δ ⊢ p⟨r⟩ ⇝ᵉ t₁ ⋅ t₂
 
 mutual
 
@@ -41,29 +41,29 @@ inductive Resolves :
 
   -- ─────────────────── R-Var
   -- γ; δ ⊢ x ⇝ γ(x)
-  | var : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .var x ⇝ .var (γ x)
+  | var : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ $[x] ⇝ $[γ x]
 
   -- ─────────────────────── R-Instance
   -- γ; δ ⊢ d ⇝ δ(d)
-  | instance : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .instance d ⇝ .var (δ d)
+  | instance : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ ι[d] ⇝ $[δ d]
 
   -- ───────────── R-Int
   -- γ; δ ⊢ n ⇝ n
-  | int : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .int n ⇝ .int n
+  | int : 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ ⌜n⌝ ⇝ ⌜n⌝
 
   -- lift γ; ↑δ ⊢ c ⇝ t
   -- ───────────────────────────────── R-Lambda
   -- γ; δ ⊢ λ(x:A). c ⇝ λ(x:|A|). t
   | lam :
       (𝒮 ∣ q ∣ Δ ∣ Renaming.lift γ ∣ Nat.succ ∘ δ ⊢ c ⇝ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .lam A c ⇝ .lam A.erase t
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ λ[A]. c ⇝ λ[A.erase]. t
 
   -- ↑γ; lift δ ⊢ c ⇝ t    Δ extended by d:A
   -- ────────────────────────────────────── R-Implicit-Lambda
   -- γ; δ ⊢ λ⟨d:A⟩. c ⇝ λ(d:|A|). t
   | implicitLam :
       (𝒮 ∣ q ∣ A :: Δ ∣ Nat.succ ∘ γ ∣ Renaming.lift δ ⊢ c ⇝ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .implicitLam A c ⇝ .lam A.erase t
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ λ⟨A⟩. c ⇝ λ[A.erase]. t
 
   -- γ; δ ⊢ c₁ ⇝ t₁    γ; δ ⊢ c₂ ⇝ t₂
   -- ───────────────────────────────── R-App
@@ -71,7 +71,7 @@ inductive Resolves :
   | app :
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁ ⇝ t₁) →
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₂ ⇝ t₂) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .app c₁ c₂ ⇝ .app t₁ t₂
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁ ⋅ c₂ ⇝ t₁ ⋅ t₂
 
   -- γ; δ ⊢ c₁ ⇝ t₁    γ; δ ⊢ c₂ ⇝ t₂
   -- ───────────────────────────────── R-Implicit-App
@@ -79,21 +79,21 @@ inductive Resolves :
   | implicitApp :
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁ ⇝ t₁) →
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₂ ⇝ t₂) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .implicitApp c₁ c₂ ⇝ .app t₁ t₂
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁⟨c₂⟩ ⇝ t₁ ⋅ t₂
 
   -- q+1; ↑Δ; γ; δ ⊢ c ⇝ t
   -- ───────────────────────── R-Type-Lambda
   -- q; Δ; γ; δ ⊢ Λα. c ⇝ Λα. t
   | typeLam :
       (𝒮 ∣ q + 1 ∣ Δ.map (ImplicitType.rename Nat.succ) ∣ γ ∣ δ ⊢ c ⇝ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .typeLam c ⇝ .typeLam t
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ Λ. c ⇝ Λ. t
 
   -- γ; δ ⊢ c ⇝ t
   -- ────────────────────────── R-Type-App
   -- γ; δ ⊢ c[A] ⇝ t[|A|]
   | typeApp :
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c ⇝ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .typeApp c A ⇝ .typeApp t A.erase
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c⟦A⟧ ⇝ t⟦A.erase⟧
 
   -- γ; δ ⊢ c₁ ⇝ t₁    lift γ; ↑δ ⊢ c₂ ⇝ t₂
   -- ───────────────────────────────────────────── R-Let
@@ -101,7 +101,7 @@ inductive Resolves :
   | letIn :
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁ ⇝ t₁) →
       (𝒮 ∣ q ∣ Δ ∣ Renaming.lift γ ∣ Nat.succ ∘ δ ⊢ c₂ ⇝ t₂) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .letIn A c₁ c₂ ⇝ .letIn t₁ t₂
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ let[A] c₁ in c₂ ⇝ let t₁ in t₂
 
   -- γ; δ ⊢ c₁ ⇝ t₁    ↑γ; lift δ ⊢ c₂ ⇝ t₂    Δ extended by d:A
   -- ───────────────────────────────────────────────────────── R-Instance-Let
@@ -109,14 +109,14 @@ inductive Resolves :
   | instanceLet :
       (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c₁ ⇝ t₁) →
       (𝒮 ∣ q ∣ A :: Δ ∣ Nat.succ ∘ γ ∣ Renaming.lift δ ⊢ c₂ ⇝ t₂) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .instanceLet A c₁ c₂ ⇝ .letIn t₁ t₂
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ instance[A] c₁ in c₂ ⇝ let t₁ in t₂
 
   -- lift γ; ↑δ ⊢ c ⇝ t
   -- ─────────────────────────────── R-Fix
   -- γ; δ ⊢ fix x:A. c ⇝ fix x:|A|. t
   | fix :
       (𝒮 ∣ q ∣ Δ ∣ Renaming.lift γ ∣ Nat.succ ∘ δ ⊢ c ⇝ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .fix A c ⇝ .fix A.erase t
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ fix[A]. c ⇝ fix[A.erase]. t
 
   -- 𝒮(q,Δ,A,p)    q; Δ ⊢ev p:A    δ ⊢ p ⇝ t
   -- ─────────────────────────────────────── R-Need
@@ -125,19 +125,19 @@ inductive Resolves :
       𝒮 q Δ A p →
       (q ∣ Δ ⊢ᵉ p ∶ A) →
       (δ ⊢ p ⇝ᵉ t) →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .need A ⇝ t
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ ?[A] ⇝ t
 
   -- γ; δ ⊢ cℓ ⇝ tℓ for each field ℓ
   -- ───────────────────────────────── R-Record
   -- γ; δ ⊢ {ℓ=cℓ} ⇝ {ℓ=tℓ}
   | record :
       ResolveFields 𝒮 q Δ γ δ R S →
-      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .record R ⇝ .record S
+      𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ {R} ⇝ {S}
 
   -- γ; δ ⊢ c ⇝ t
   -- ───────────────── R-Project
   -- γ; δ ⊢ c.ℓ ⇝ t.ℓ
-  | proj : (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c ⇝ t) → 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .proj c ℓ ⇝ .proj t ℓ
+  | proj : (𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c ⇝ t) → 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c.[ℓ] ⇝ t.[ℓ]
 
 inductive ResolveFields :
   Search → Nat → List ImplicitType → (Nat → Nat) → (Nat → Nat) →

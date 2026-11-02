@@ -5,13 +5,13 @@ import ImplicitSynthesis.SMT
 namespace ImplicitSynthesis.SMT
 namespace Refinement
 
-theorem Remove.member {j : ι} {R S} (h : Remove j R S) : j ∈ R := by {
+lemma Remove.member {j : ι} {R S} (h : Remove j R S) : j ∈ R := by {
   induction h with
   | here => exact List.Mem.head ..
   | there _ ih => exact List.Mem.tail _ ih
 }
 
-theorem Remove.partition {j R S} (h : Remove j R S) (k : ι) : k ∈ R ↔ k = j ∨ k ∈ S := by {
+lemma Remove.partition {j R S} (h : Remove j R S) (k : ι) : k ∈ R ↔ k = j ∨ k ∈ S := by {
   induction h with
   | here =>
     {
@@ -43,13 +43,13 @@ theorem Remove.partition {j R S} (h : Remove j R S) (k : ι) : k ∈ R ↔ k = j
     }
 }
 
-theorem Remove.length {j : ι} {R S} (h : Remove j R S) : Nat.succ S.length = R.length := by {
+lemma Remove.length {j : ι} {R S} (h : Remove j R S) : Nat.succ S.length = R.length := by {
   induction h with
   | here => rfl
   | there _ ih => exact congrArg Nat.succ ih
 }
 
-theorem Step.preservesModels {B : M → Prop} {V : ι → M → Prop}
+lemma Step.preservesModels {B : M → Prop} {V : ι → M → Prop}
   [Oracle (List ι) M (Partial B V)] {K R K' R'} (h : Step B V K R K' R') (μ : M) :
   Complete B V K R μ ↔ Complete B V K' R' μ
 := by {
@@ -89,13 +89,14 @@ theorem Step.rejectsModel {B : M → Prop} {V : ι → M → Prop}
     }
 }
 
-theorem Step.fresh {B : M → Prop} {V : ι → M → Prop}
-  [Oracle (List ι) M (Partial B V)] {K R j S} (h : Step B V K R (j :: K) S) : j ∉ K := by {
+lemma Step.fresh {B : M → Prop} {V : ι → M → Prop}
+  [Oracle (List ι) M (Partial B V)] {K R j S} (h : Step B V K R (j :: K) S) : j ∉ K
+:= by {
   cases h with
   | reject hs hv _ => exact fun hj => hv ((Oracle.satSound hs).2 _ hj)
 }
 
-theorem Step.length {B : M → Prop} {V : ι → M → Prop}
+lemma Step.length {B : M → Prop} {V : ι → M → Prop}
   [Oracle (List ι) M (Partial B V)] {K R K' R'} (h : Step B V K R K' R') :
   Nat.succ R'.length = R.length
 := by {
@@ -103,7 +104,7 @@ theorem Step.length {B : M → Prop} {V : ι → M → Prop}
   | reject _ _ hr => exact hr.length
 }
 
-theorem Chain.length {B : M → Prop} {V : ι → M → Prop}
+lemma Chain.length {B : M → Prop} {V : ι → M → Prop}
   [Oracle (List ι) M (Partial B V)] {K R K' R' n} (h : Chain B V K R K' R' n) :
   n + R'.length = R.length
 := by {
@@ -117,7 +118,8 @@ theorem Chain.length {B : M → Prop} {V : ι → M → Prop}
 }
 
 theorem Chain.bound {B : M → Prop} {V : ι → M → Prop}
-  [Oracle (List ι) M (Partial B V)] {K R K' R' n} (h : Chain B V K R K' R' n) : n ≤ R.length := by {
+  [Oracle (List ι) M (Partial B V)] {K R K' R' n} (h : Chain B V K R K' R' n) : n ≤ R.length
+:= by {
   rw [← h.length]
   exact Nat.le_add_right n R'.length
 }
@@ -131,7 +133,7 @@ theorem Chain.preservesModels {B : M → Prop} {V : ι → M → Prop}
   | cons hs _ ih => exact (hs.preservesModels μ).trans ih
 }
 
-theorem completeTerminal {B : M → Prop} {V : ι → M → Prop} {K μ} :
+lemma completeTerminal {B : M → Prop} {V : ι → M → Prop} {K μ} :
   Complete B V K [] μ ↔ Partial B V K μ
 := by {
   constructor
@@ -147,7 +149,7 @@ theorem completeTerminal {B : M → Prop} {V : ι → M → Prop} {K μ} :
 
 end Refinement
 
-theorem differentSat {Holds : F → M → Prop} {Projects : M → K → Prop}
+lemma differentSat {Holds : F → M → Prop} {Projects : M → K → Prop}
   [Oracle (Selection F K) M (SelectedHolds Holds Projects)] {φ κ μ}
   (h : Oracle.Responds (SelectedHolds Holds Projects) (.different φ κ) (.sat μ)) :
   Holds φ μ ∧ ∃ κ', Projects μ κ' ∧ κ' ≠ κ
@@ -155,7 +157,7 @@ theorem differentSat {Holds : F → M → Prop} {Projects : M → K → Prop}
   exact Oracle.satSound (Holds := SelectedHolds Holds Projects) h
 }
 
-theorem differentUnsat {Holds : F → M → Prop} {Projects : M → K → Prop} [DecidableEq K]
+lemma differentUnsat {Holds : F → M → Prop} {Projects : M → K → Prop} [DecidableEq K]
   [Oracle (Selection F K) M (SelectedHolds Holds Projects)] {φ κ}
   (h : Oracle.Responds (SelectedHolds Holds Projects) (.different φ κ) .unsat) :
   ∀ μ κ', Holds φ μ → Projects μ κ' → κ' = κ

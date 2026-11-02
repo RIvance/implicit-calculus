@@ -8,13 +8,13 @@ inductive Evidence where
   | ref (d : Nat)
   | typeApp (p : Evidence) (A : ImplicitType)
   | implicitApp (p q : Evidence)
-  deriving Repr
+deriving Repr
 
 inductive EvidenceShape where
   | ref (d : Nat)
   | typeApp (p : EvidenceShape)
   | implicitApp (p r : EvidenceShape)
-  deriving DecidableEq
+deriving DecidableEq
 
 def Evidence.shape : Evidence → EvidenceShape
   | .ref d => .ref d
@@ -37,7 +37,7 @@ inductive ImplicitTerm where
   | need (A : ImplicitType)
   | record (R : List (Label × ImplicitTerm))
   | proj (c : ImplicitTerm) (ℓ : Label)
-  deriving Repr
+deriving Repr
 
 inductive CoreTerm where
   | var (x : Nat)
@@ -50,6 +50,6 @@ inductive CoreTerm where
   | fix (A : CoreType) (t : CoreTerm)
   | record (R : List (Label × CoreTerm))
   | proj (t : CoreTerm) (ℓ : Label)
-  deriving Repr
+deriving Repr
 
 end ImplicitSynthesis

@@ -2,62 +2,61 @@ import ImplicitSynthesis.Metatheory.Synthesis
 
 /-! Concrete derivations exercising binding, records, evidence search, and ambiguity. -/
 
-namespace ImplicitSynthesis.Examples
+namespace Example
+
+open ImplicitSynthesis
 
 /-- Declarative search admits precisely the evidence derivations. -/
 def declarative : Search := fun q Δ A p => q ∣ Δ ⊢ᵉ p ∶ A
 
 /-- Λα. λ(x:α). x : ∀α. α → α. -/
-theorem polymorphicIdentity :
-  0 ∣ [] ∣ [] ⊢ⁱ .typeLam (.lam (.var 0) (.var 0)) ∶ .all (.arrow (.var 0) (.var 0))
+lemma polymorphicIdentity :
+  0 ∣ [] ∣ [] ⊢ⁱ Λ. λ[#0]. $[0] ∶ ∀. #0 ⟶ #0
 := by {
   exact .typeLam (.lam (.var (Nat.zero_lt_succ 0)) (.var .here))
 }
 
 /-- λ⟨d:Int⟩. λ(x:Int). ?Int resolves to λ(d:Int). λ(x:Int). d. -/
-theorem instanceUnderOrdinaryBinder :
-  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ .implicitLam .int (.lam .int (.need .int)) ⇝
-    .lam .int (.lam .int (.var 1))
+lemma instanceUnderOrdinaryBinder :
+  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ λ⟨ℤ⟩. λ[ℤ]. ?[ℤ] ⇝ λ[ℤ]. λ[ℤ]. $[1]
 := by {
   exact .implicitLam (.lam (.need (.ref .here) (.ref .here) .ref))
 }
 
 /-- λ(x:Int). λ⟨d:Int⟩. x resolves to λ(x:Int). λ(d:Int). x. -/
-theorem ordinaryUnderInstanceBinder :
-  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ .lam .int (.implicitLam .int (.var 0)) ⇝
-    .lam .int (.lam .int (.var 1))
+lemma ordinaryUnderInstanceBinder :
+  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ λ[ℤ]. λ⟨ℤ⟩. $[0] ⇝ λ[ℤ]. λ[ℤ]. $[1]
 := by {
   exact .lam (.implicitLam .var)
 }
 
 /-- instance d:Int = 7 in let x:Int = 2 in ?Int selects d. -/
-theorem localInstance :
-  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ .instanceLet .int (.int 7) (.letIn .int (.int 2) (.need .int)) ⇝
-    .letIn (.int 7) (.letIn (.int 2) (.var 1))
+lemma localInstance :
+  declarative ∣ 0 ∣ [] ∣ id ∣ id ⊢ instance[ℤ] ⌜7⌝ in let[ℤ] ⌜2⌝ in ?[ℤ] ⇝
+    let ⌜7⌝ in let ⌜2⌝ in $[1]
 := by {
   exact .instanceLet .int (.letIn .int (.need (.ref .here) (.ref .here) .ref))
 }
 
-theorem localInstanceCoreTyping :
-  0 ∣ [] ⊢ᶜ .letIn (.int 7) (.letIn (.int 2) (.var 1)) ∶ .int
+lemma localInstanceCoreTyping :
+  0 ∣ [] ⊢ᶜ let ⌜7⌝ in let ⌜2⌝ in $[1] ∶ ℤ
 := by {
   exact Resolves.closedPreservesTyping (.instanceLet .int (.letIn .int (.need .int))) localInstance
 }
 
 /-- The calculus permits fix x:Int. x; no termination claim is made. -/
-theorem unrestrictedFix : 0 ∣ [] ∣ [] ⊢ⁱ .fix .int (.var 0) ∶ .int := by {
+lemma unrestrictedFix : 0 ∣ [] ∣ [] ⊢ⁱ fix[ℤ]. $[0] ∶ ℤ := by {
   exact .fix .int (.var .here)
 }
 
 /-- Instantiating the outer α beneath ∀β preserves the free variable γ. -/
-theorem captureAvoidance :
-  (ImplicitType.all (.arrow (.var 1) (.var 0))).instantiate (.var 0) =
-    .all (.arrow (.var 1) (.var 0))
+lemma captureAvoidance :
+  (∀. #1 ⟶ #0 : ImplicitType).instantiate #0 = (∀. #1 ⟶ #0 : ImplicitType)
 := by rfl
 
 /-- {2 = 7, 0 = 3} has the unordered record type {0:Int, 2:Int}. -/
-theorem reorderedRecord :
-  0 ∣ [] ∣ [] ⊢ⁱ .record [(2, .int 7), (0, .int 3)] ∶ .record [(0, .int), (2, .int)]
+lemma reorderedRecord :
+  0 ∣ [] ∣ [] ⊢ⁱ {[(2, ⌜7⌝), (0, ⌜3⌝)]} ∶ {[(0, ℤ), (2, ℤ)]}
 := by {
   apply ImplicitTyping.record
   · apply ImplicitWellFormed.record
@@ -92,27 +91,25 @@ open Synthesis
 
 /-- f:∀α.α ⇒ α, d:Int ⊢ f[Int]⟨d⟩ : Int, with shared-program cost four. -/
 def polymorphicQuery : Query :=
-  ⟨0, [.all (.implicitArrow (.var 0) (.var 0)), .int], .int, 4, 1⟩
+  ⟨0, [∀. #0 ⇒ #0, ℤ], ℤ, 4, 1⟩
 
 def polymorphicModel : Model :=
-  ⟨[⟨0, [.instance 0, .type .int]⟩, ⟨1, []⟩],
-   [[.int, .implicitArrow .int .int, .all (.implicitArrow (.var 0) (.var 0))], [.int]],
-   [.int, .int]⟩
+  ⟨[⟨0, [.instance 0, .type ℤ]⟩, ⟨1, []⟩], [[ℤ, ℤ ⇒ ℤ, ∀. #0 ⇒ #0], [ℤ]], [ℤ, ℤ]⟩
 
-theorem polymorphicModelSatisfies : Holds polymorphicQuery polymorphicModel := by {
+lemma polymorphicModelSatisfies : Holds polymorphicQuery polymorphicModel := by {
   refine ⟨?_, .here, Nat.le.refl⟩
   exact .cons (.cons .nil (.intro (.there .here) .nil))
     (.intro .here (.instance (.type .nil ⟨.int, .int⟩) .here))
 }
 
-theorem polymorphicModelDecodes :
-  DecodeProgram polymorphicModel.program [.implicitApp (.typeApp (.ref 0) .int) (.ref 1), .ref 1]
+lemma polymorphicModelDecodes :
+  DecodeProgram polymorphicModel.program [$[0]⟦ℤ⟧⟨$[1]⟩, $[1]]
 := by {
   exact .cons (.cons .nil (.intro .nil)) (.intro (.instance (.type .nil) .here))
 }
 
-theorem synthesizedPolymorphicEvidence :
-  0 ∣ polymorphicQuery.instances ⊢ᵉ .implicitApp (.typeApp (.ref 0) .int) (.ref 1) ∶ .int
+lemma synthesizedPolymorphicEvidence :
+  0 ∣ polymorphicQuery.instances ⊢ᵉ $[0]⟦ℤ⟧⟨$[1]⟩ ∶ ℤ
 := by {
   rcases polymorphicModelSatisfies.typedEvidence with ⟨ps, p, hd, hp, ht⟩
   cases polymorphicModelDecodes.deterministic hd
@@ -121,24 +118,24 @@ theorem synthesizedPolymorphicEvidence :
 }
 
 /-- Two distinct instance bindings yield distinct bounded evidence shapes. -/
-def ambiguousQuery : Query := ⟨0, [.int, .int], .int, 1, 1⟩
+def ambiguousQuery : Query := ⟨0, [ℤ, ℤ], ℤ, 1, 1⟩
 
-theorem twoInstanceChoices :
-  BoundedEvidence ambiguousQuery (.ref 0) ∧ BoundedEvidence ambiguousQuery (.ref 1) ∧
-    (Evidence.ref 0).shape ≠ (Evidence.ref 1).shape
+lemma twoInstanceChoices :
+  BoundedEvidence ambiguousQuery $[0] ∧ BoundedEvidence ambiguousQuery $[1] ∧
+    ($[0] : Evidence).shape ≠ ($[1] : Evidence).shape
 := by {
   refine ⟨?_, ?_, ?_⟩
-  · exact ⟨[⟨0, []⟩], [.ref 0], [.int], .cons .nil (.intro .nil) (.ref .here) .nil,
+  · exact ⟨[⟨0, []⟩], [$[0]], [ℤ], .cons .nil (.intro .nil) (.ref .here) .nil,
       .here, .here, Nat.le.refl⟩
-  · exact ⟨[⟨1, []⟩], [.ref 1], [.int], .cons .nil (.intro .nil) (.ref (.there .here)) .nil,
+  · exact ⟨[⟨1, []⟩], [$[1]], [ℤ], .cons .nil (.intro .nil) (.ref (.there .here)) .nil,
       .here, .here, Nat.le.refl⟩
   · intro h
     cases h
 }
 
 /-- An ordinary function instance can be selected, but cannot be automatically applied. -/
-theorem ordinaryArrowOnly {q p A} (h : q ∣ [.arrow .int .int] ⊢ᵉ p ∶ A) : A = .arrow .int .int := by {
-  generalize hΔ : ([.arrow .int .int] : List ImplicitType) = Δ at h
+lemma ordinaryArrowOnly {q p A} (h : q ∣ [ℤ ⟶ ℤ] ⊢ᵉ p ∶ A) : A = (ℤ ⟶ ℤ : ImplicitType) := by {
+  generalize hΔ : ([ℤ ⟶ ℤ] : List ImplicitType) = Δ at h
   induction h with
   | ref h => cases hΔ; cases h with
     | here => rfl
@@ -147,9 +144,9 @@ theorem ordinaryArrowOnly {q p A} (h : q ∣ [.arrow .int .int] ⊢ᵉ p ∶ A) 
   | implicitApp _ _ ih _ => cases ih hΔ
 }
 
-theorem noOrdinaryApplication {q p} : ¬ (q ∣ [.arrow .int .int] ⊢ᵉ p ∶ .int) := by {
+lemma noOrdinaryApplication {q p} : ¬ (q ∣ [ℤ ⟶ ℤ] ⊢ᵉ p ∶ ℤ) := by {
   intro h
   cases ordinaryArrowOnly h
 }
 
-end ImplicitSynthesis.Examples
+end Example

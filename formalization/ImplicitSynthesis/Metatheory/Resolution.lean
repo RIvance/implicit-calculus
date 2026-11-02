@@ -12,12 +12,12 @@ def Embeds (γ : Nat → Nat) (Γ : List ImplicitType) (H : List CoreType) : Pro
 
 namespace Embeds
 
-theorem weaken {γ Γ H} (h : Embeds γ Γ H) (T : CoreType) : Embeds (Nat.succ ∘ γ) Γ (T :: H) := by {
+lemma weaken {γ Γ H} (h : Embeds γ Γ H) (T : CoreType) : Embeds (Nat.succ ∘ γ) Γ (T :: H) := by {
   intro x A hx
   exact .there (h x A hx)
 }
 
-theorem lift {γ Γ H} (h : Embeds γ Γ H) (A : ImplicitType) :
+lemma lift {γ Γ H} (h : Embeds γ Γ H) (A : ImplicitType) :
   Embeds (Renaming.lift γ) (A :: Γ) (A.erase :: H)
 := by {
   intro x B hx
@@ -26,7 +26,7 @@ theorem lift {γ Γ H} (h : Embeds γ Γ H) (A : ImplicitType) :
   | there hx => exact .there (h _ B hx)
 }
 
-theorem typeBind {γ Γ H} (h : Embeds γ Γ H) :
+lemma typeBind {γ Γ H} (h : Embeds γ Γ H) :
   Embeds γ (Γ.map (ImplicitType.rename Nat.succ)) (H.map (CoreType.rename Nat.succ))
 := by {
   intro x A hx
@@ -35,11 +35,11 @@ theorem typeBind {γ Γ H} (h : Embeds γ Γ H) :
   exact (h x B hB).map (CoreType.rename Nat.succ)
 }
 
-theorem empty (γ : Nat → Nat) : Embeds γ [] [] := by { intro x A h; cases h }
+lemma empty (γ : Nat → Nat) : Embeds γ [] [] := by { intro x A h; cases h }
 
 end Embeds
 
-theorem LowerEvidence.preservesTyping {q Δ p A δ t H}
+lemma LowerEvidence.preservesTyping {q Δ p A δ t H}
   (hp : q ∣ Δ ⊢ᵉ p ∶ A) (hl : δ ⊢ p ⇝ᵉ t) (hδ : Embeds δ Δ H) :
   q ∣ H ⊢ᶜ t ∶ A.erase
 := by {
@@ -61,7 +61,7 @@ theorem LowerEvidence.preservesTyping {q Δ p A δ t H}
     }
 }
 
-theorem LowerEvidence.total (δ : Nat → Nat) (p : Evidence) : ∃ t, δ ⊢ p ⇝ᵉ t := by {
+lemma LowerEvidence.total (δ : Nat → Nat) (p : Evidence) : ∃ t, δ ⊢ p ⇝ᵉ t := by {
   induction p with
   | ref d => exact ⟨_, .ref⟩
   | typeApp p A ih => rcases ih with ⟨t, ht⟩; exact ⟨_, .typeApp ht⟩
@@ -73,7 +73,7 @@ theorem LowerEvidence.total (δ : Nat → Nat) (p : Evidence) : ∃ t, δ ⊢ p 
     }
 }
 
-theorem LowerEvidence.deterministic {δ p t₁ t₂}
+lemma LowerEvidence.deterministic {δ p t₁ t₂}
   (h₁ : δ ⊢ p ⇝ᵉ t₁) (h₂ : δ ⊢ p ⇝ᵉ t₂) : t₁ = t₂
 := by {
   induction h₁ generalizing t₂ with
@@ -84,7 +84,7 @@ theorem LowerEvidence.deterministic {δ p t₁ t₂}
     | implicitApp h₂ h₃ => exact congr (congrArg CoreTerm.app (ih₁ h₂)) (ih₂ h₃)
 }
 
-theorem EvidenceTyping.unique {q Δ p A B}
+lemma EvidenceTyping.unique {q Δ p A B}
   (h₁ : q ∣ Δ ⊢ᵉ p ∶ A) (h₂ : q ∣ Δ ⊢ᵉ p ∶ B) : A = B
 := by {
   induction h₁ generalizing B with
@@ -96,7 +96,7 @@ theorem EvidenceTyping.unique {q Δ p A B}
     | implicitApp h₂ _ => exact (ImplicitType.implicitArrow.inj (ih h₂)).2
 }
 
-theorem EvidenceTyping.noEmpty {q p A} (h : q ∣ [] ⊢ᵉ p ∶ A) : False := by {
+lemma EvidenceTyping.noEmpty {q p A} (h : q ∣ [] ⊢ᵉ p ∶ A) : False := by {
   generalize hΔ : ([] : List ImplicitType) = Δ at h
   induction h with
   | ref h => cases hΔ; cases h
@@ -105,8 +105,8 @@ theorem EvidenceTyping.noEmpty {q p A} (h : q ∣ [] ⊢ᵉ p ∶ A) : False := 
 }
 
 theorem ImplicitTyping.permuteRecord {q Γ Δ r s A}
-  (h : q ∣ Γ ∣ Δ ⊢ⁱ .record r ∶ A) (hπ : r.Perm s) :
-  q ∣ Γ ∣ Δ ⊢ⁱ .record s ∶ A
+  (h : q ∣ Γ ∣ Δ ⊢ⁱ {r} ∶ A) (hπ : r.Perm s) :
+  q ∣ Γ ∣ Δ ⊢ⁱ {s} ∶ A
 := by {
   cases h with
   | record hR hkeys hfields =>
@@ -118,7 +118,7 @@ theorem ImplicitTyping.permuteRecord {q Γ Δ r s A}
 }
 
 theorem CoreTyping.permuteRecord {q Γ r s A}
-  (h : q ∣ Γ ⊢ᶜ .record r ∶ A) (hπ : r.Perm s) : q ∣ Γ ⊢ᶜ .record s ∶ A
+  (h : q ∣ Γ ⊢ᶜ {r} ∶ A) (hπ : r.Perm s) : q ∣ Γ ⊢ᶜ {s} ∶ A
 := by {
   cases h with
   | record hR hkeys hfields =>
@@ -129,7 +129,7 @@ theorem CoreTyping.permuteRecord {q Γ r s A}
     }
 }
 
-theorem ResolveFields.labels {𝒮 q Δ γ δ R S} (h : ResolveFields 𝒮 q Δ γ δ R S) :
+lemma ResolveFields.labels {𝒮 q Δ γ δ R S} (h : ResolveFields 𝒮 q Δ γ δ R S) :
   R.map Prod.fst = S.map Prod.fst
 := by {
   induction R generalizing S with
@@ -138,7 +138,7 @@ theorem ResolveFields.labels {𝒮 q Δ γ δ R S} (h : ResolveFields 𝒮 q Δ 
     | cons _ hR => exact congrArg (List.cons _) (ih hR)
 }
 
-theorem ResolveFields.preimage {𝒮 q Δ γ δ R S ℓ t}
+lemma ResolveFields.preimage {𝒮 q Δ γ δ R S ℓ t}
   (h : ResolveFields 𝒮 q Δ γ δ R S) (ht : (ℓ, t) ∈ S) :
   ∃ c, (ℓ, c) ∈ R ∧ 𝒮 ∣ q ∣ Δ ∣ γ ∣ δ ⊢ c ⇝ t
 := by {
@@ -208,8 +208,11 @@ theorem Resolves.preservesTyping {𝒮 q Γ Δ c A γ δ t H}
             exact ih ℓ c A hc hA hr hγ hδ
         }
     }
-  | proj _ hA ih => cases hr with
-    | proj hr => exact .proj (ih hr hγ hδ) (ImplicitType.memEraseFields hA)
+  | proj _ hA ih =>
+    {
+      cases hr with
+      | proj hr => exact .proj (ih hr hγ hδ) (ImplicitType.memEraseFields hA)
+    }
 }
 
 theorem Resolves.closedPreservesTyping {𝒮 c A t}

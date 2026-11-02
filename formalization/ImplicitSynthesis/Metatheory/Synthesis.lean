@@ -7,7 +7,7 @@ import ImplicitSynthesis.Metatheory.SMT
 namespace ImplicitSynthesis
 namespace Synthesis
 
-theorem DecodeSteps.deterministic {ps p κ r₁ r₂}
+lemma DecodeSteps.deterministic {ps p κ r₁ r₂}
   (h₁ : DecodeSteps ps p κ r₁) (h₂ : DecodeSteps ps p κ r₂) : r₁ = r₂
 := by {
   induction h₁ generalizing r₂ with
@@ -18,7 +18,7 @@ theorem DecodeSteps.deterministic {ps p κ r₁ r₂}
     | «instance» h₂ hk₂ => exact congr (congrArg Evidence.implicitApp (ih h₂)) (hk.unique hk₂)
 }
 
-theorem DecodeSpine.deterministic {ps s p₁ p₂}
+lemma DecodeSpine.deterministic {ps s p₁ p₂}
   (h₁ : DecodeSpine ps s p₁) (h₂ : DecodeSpine ps s p₂) : p₁ = p₂
 := by {
   cases h₁ with
@@ -26,7 +26,7 @@ theorem DecodeSpine.deterministic {ps s p₁ p₂}
     | intro h₂ => exact h₁.deterministic h₂
 }
 
-theorem DecodeProgram.deterministic {π ps₁ ps₂}
+lemma DecodeProgram.deterministic {π ps₁ ps₂}
   (h₁ : DecodeProgram π ps₁) (h₂ : DecodeProgram π ps₂) : ps₁ = ps₂
 := by {
   induction h₁ generalizing ps₂ with
@@ -35,7 +35,7 @@ theorem DecodeProgram.deterministic {π ps₁ ps₂}
     | cons h₂ hs₂ => cases ih h₂; exact congrArg (fun p => p :: _) (hs.deterministic hs₂)
 }
 
-theorem Projects.unique {μ κ₁ κ₂} (h₁ : Projects μ κ₁) (h₂ : Projects μ κ₂) : κ₁ = κ₂ := by {
+lemma Projects.unique {μ κ₁ κ₂} (h₁ : Projects μ κ₁) (h₂ : Projects μ κ₂) : κ₁ = κ₂ := by {
   rcases h₁ with ⟨ps₁, p₁, hd₁, hp₁, hκ₁⟩
   rcases h₂ with ⟨ps₂, p₂, hd₂, hp₂, hκ₂⟩
   cases hd₁.deterministic hd₂
@@ -43,13 +43,13 @@ theorem Projects.unique {μ κ₁ κ₂} (h₁ : Projects μ κ₁) (h₂ : Proj
   exact hκ₁.symm.trans hκ₂
 }
 
-theorem ProgramTyping.decode {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U) : DecodeProgram π ps := by {
+lemma ProgramTyping.decode {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U) : DecodeProgram π ps := by {
   induction h with
   | nil => exact .nil
   | cons _ hd _ _ ih => exact .cons ih hd
 }
 
-theorem ProgramTyping.lookup {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U)
+lemma ProgramTyping.lookup {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U)
   {k A} (hk : Lookup U k A) : ∃ p, Lookup ps k p ∧ (q ∣ Δ ⊢ᵉ p ∶ A)
 := by {
   induction h generalizing k with
@@ -63,7 +63,7 @@ theorem ProgramTyping.lookup {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U)
       }
 }
 
-theorem ProgramTyping.lookupType {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U)
+lemma ProgramTyping.lookupType {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U)
   {k p A} (hk : Lookup ps k p) (hp : q ∣ Δ ⊢ᵉ p ∶ A) : Lookup U k A
 := by {
   induction h generalizing k with
@@ -73,7 +73,7 @@ theorem ProgramTyping.lookupType {q V Δ π ps U} (h : ProgramTyping q V Δ π p
     | there hk => exact .there (ih hk)
 }
 
-theorem StepConstraints.argumentsValid {V U A κ τ B}
+lemma StepConstraints.argumentsValid {V U A κ τ B}
   (h : StepConstraints V U A κ τ B) : ArgumentsValid V κ
 := by {
   induction h with
@@ -82,7 +82,7 @@ theorem StepConstraints.argumentsValid {V U A κ τ B}
   | «instance» _ _ ih => exact .instance ih
 }
 
-theorem StepConstraints.sound {q V Δ U A κ τ B ps p}
+lemma StepConstraints.sound {q V Δ U A κ τ B ps p}
   (h : StepConstraints V U A κ τ B) (hV : ∀ B, V B → q ⊢ⁱᵀ B)
   (hU : ∀ k A, Lookup U k A → ∃ r, Lookup ps k r ∧ (q ∣ Δ ⊢ᵉ r ∶ A))
   (hp : q ∣ Δ ⊢ᵉ p ∶ A) :
@@ -103,7 +103,7 @@ theorem StepConstraints.sound {q V Δ U A κ τ B ps p}
     }
 }
 
-theorem SpineConstraints.sound {q V Δ U s τ A ps}
+lemma SpineConstraints.sound {q V Δ U s τ A ps}
   (h : SpineConstraints V Δ U s τ A) (hV : ∀ B, V B → q ⊢ⁱᵀ B)
   (hU : ∀ k B, Lookup U k B → ∃ r, Lookup ps k r ∧ (q ∣ Δ ⊢ᵉ r ∶ B)) :
   ∃ p, DecodeSpine ps s p ∧ (q ∣ Δ ⊢ᵉ p ∶ A) ∧ ArgumentsValid V s.arguments
@@ -116,7 +116,7 @@ theorem SpineConstraints.sound {q V Δ U s τ A ps}
     }
 }
 
-theorem ProgramConstraints.sound {q V Δ π Τ U}
+lemma ProgramConstraints.sound {q V Δ π Τ U}
   (h : ProgramConstraints V Δ π Τ U) (hV : ∀ B, V B → q ⊢ⁱᵀ B) :
   ∃ ps, ProgramTyping q V Δ π ps U
 := by {
@@ -130,7 +130,7 @@ theorem ProgramConstraints.sound {q V Δ π Τ U}
     }
 }
 
-theorem DecodeSteps.complete {q V Δ U ps p κ r B}
+lemma DecodeSteps.complete {q V Δ U ps p κ r B}
   (hd : DecodeSteps ps p κ r) (hr : q ∣ Δ ⊢ᵉ r ∶ B) (hv : ArgumentsValid V κ)
   (hU : ∀ k u A, Lookup ps k u → (q ∣ Δ ⊢ᵉ u ∶ A) → Lookup U k A) :
   ∃ A τ, (q ∣ Δ ⊢ᵉ p ∶ A) ∧ StepConstraints V U A κ τ B
@@ -159,7 +159,7 @@ theorem DecodeSteps.complete {q V Δ U ps p κ r B}
     }
 }
 
-theorem DecodeSpine.complete {q V Δ U ps s p A}
+lemma DecodeSpine.complete {q V Δ U ps s p A}
   (hd : DecodeSpine ps s p) (hp : q ∣ Δ ⊢ᵉ p ∶ A) (hv : ArgumentsValid V s.arguments)
   (hU : ∀ k u B, Lookup ps k u → (q ∣ Δ ⊢ᵉ u ∶ B) → Lookup U k B) :
   ∃ τ, SpineConstraints V Δ U s τ A
@@ -173,7 +173,7 @@ theorem DecodeSpine.complete {q V Δ U ps s p A}
     }
 }
 
-theorem ProgramTyping.complete {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U) :
+lemma ProgramTyping.complete {q V Δ π ps U} (h : ProgramTyping q V Δ π ps U) :
   ∃ Τ, ProgramConstraints V Δ π Τ U
 := by {
   induction h with
@@ -186,13 +186,13 @@ theorem ProgramTyping.complete {q V Δ π ps U} (h : ProgramTyping q V Δ π ps 
     }
 }
 
-theorem Holds.witness {φ μ} (h : Holds φ μ) : Witness φ μ.program := by {
+lemma Holds.witness {φ μ} (h : Holds φ μ) : Witness φ μ.program := by {
   rcases h with ⟨hπ, hG, hN⟩
   rcases hπ.sound (fun _ h => h.1) with ⟨ps, hp⟩
   exact ⟨ps, μ.types, hp, hG, hN⟩
 }
 
-theorem Witness.model {φ π} (h : Witness φ π) : ∃ μ, μ.program = π ∧ Holds φ μ := by {
+lemma Witness.model {φ π} (h : Witness φ π) : ∃ μ, μ.program = π ∧ Holds φ μ := by {
   rcases h with ⟨ps, U, hπ, hG, hN⟩
   rcases hπ.complete with ⟨Τ, hΤ⟩
   exact ⟨⟨π, Τ, U⟩, rfl, hΤ, hG, hN⟩
@@ -208,7 +208,7 @@ theorem boundedCorrespondence (φ : Query) (π : Program) :
     exact hμ.witness
 }
 
-theorem Holds.typedEvidence {φ μ} (h : Holds φ μ) :
+lemma Holds.typedEvidence {φ μ} (h : Holds φ μ) :
   ∃ ps p, DecodeProgram μ.program ps ∧ Lookup ps 0 p ∧ (φ.depth ∣ φ.instances ⊢ᵉ p ∶ φ.goal)
 := by {
   rcases h.witness with ⟨ps, U, hπ, hG, _⟩
@@ -242,7 +242,7 @@ theorem satCoreTyping [SMT.Oracle Query Model Holds] {φ μ δ H}
   exact ⟨ps, p, t, hd, hp, hl, hl.preservesTyping ht hδ⟩
 }
 
-theorem BoundedEvidence.model {φ p} (h : BoundedEvidence φ p) :
+lemma BoundedEvidence.model {φ p} (h : BoundedEvidence φ p) :
   ∃ μ, Holds φ μ ∧ Projects μ p.shape
 := by {
   rcases h with ⟨π, ps, U, hπ, hp, hG, hN⟩
@@ -250,7 +250,7 @@ theorem BoundedEvidence.model {φ p} (h : BoundedEvidence φ p) :
   exact ⟨⟨π, Τ, U⟩, ⟨hΤ, hG, hN⟩, ps, p, hπ.decode, hp, rfl⟩
 }
 
-theorem Holds.projectedEvidence {φ μ κ} (h : Holds φ μ) (hκ : Projects μ κ) :
+lemma Holds.projectedEvidence {φ μ κ} (h : Holds φ μ) (hκ : Projects μ κ) :
   ∃ p, BoundedEvidence φ p ∧ p.shape = κ
 := by {
   rcases hκ with ⟨ps, p, hd, hp, hκ⟩
@@ -282,7 +282,7 @@ theorem ambiguityUnsat
   exact SMT.differentUnsat h μ p.shape hμ hκ
 }
 
-theorem OracleSearch.sound [SMT.Oracle Query Model Holds] {N H q Δ A p}
+lemma OracleSearch.sound [SMT.Oracle Query Model Holds] {N H q Δ A p}
   (h : OracleSearch N H q Δ A p) : q ∣ Δ ⊢ᵉ p ∶ A
 := by {
   rcases h with ⟨μ, ps, hs, hd, hp⟩
@@ -294,7 +294,7 @@ theorem OracleSearch.sound [SMT.Oracle Query Model Holds] {N H q Δ A p}
 
 theorem OracleSearch.resolvesNeed [SMT.Oracle Query Model Holds] {N H q Δ A p γ δ Γ}
   (h : OracleSearch N H q Δ A p) (hδ : Embeds δ Δ Γ) :
-  ∃ t, OracleSearch N H ∣ q ∣ Δ ∣ γ ∣ δ ⊢ .need A ⇝ t ∧ (q ∣ Γ ⊢ᶜ t ∶ A.erase)
+  ∃ t, OracleSearch N H ∣ q ∣ Δ ∣ γ ∣ δ ⊢ ?[A] ⇝ t ∧ (q ∣ Γ ⊢ᶜ t ∶ A.erase)
 := by {
   rcases LowerEvidence.total δ p with ⟨t, ht⟩
   exact ⟨t, .need h h.sound ht, ht.preservesTyping h.sound hδ⟩

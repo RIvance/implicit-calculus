@@ -24,32 +24,32 @@ inductive HeightAtMost : Nat → ImplicitType → Prop where
 
   -- ───────────────── H-Int
   -- h(Int) ≤ H + 1
-  | int : HeightAtMost (Nat.succ H) .int
+  | int : HeightAtMost (Nat.succ H) ℤ
 
   -- ───────────────── H-Var
   -- h(α) ≤ H + 1
-  | var : HeightAtMost (Nat.succ H) (.var α)
+  | var : HeightAtMost (Nat.succ H) #α
 
   -- h(A) ≤ H    h(B) ≤ H
   -- ───────────────────── H-Arrow
   -- h(A → B) ≤ H + 1
-  | arrow : HeightAtMost H A → HeightAtMost H B → HeightAtMost (Nat.succ H) (.arrow A B)
+  | arrow : HeightAtMost H A → HeightAtMost H B → HeightAtMost (Nat.succ H) (A ⟶ B)
 
   -- h(A) ≤ H    h(B) ≤ H
   -- ───────────────────── H-Implicit-Arrow
   -- h(A ⇒ B) ≤ H + 1
   | implicitArrow :
-      HeightAtMost H A → HeightAtMost H B → HeightAtMost (Nat.succ H) (.implicitArrow A B)
+      HeightAtMost H A → HeightAtMost H B → HeightAtMost (Nat.succ H) (A ⇒ B)
 
   -- h(A) ≤ H
   -- ───────────────── H-All
   -- h(∀α. A) ≤ H + 1
-  | all : HeightAtMost H A → HeightAtMost (Nat.succ H) (.all A)
+  | all : HeightAtMost H A → HeightAtMost (Nat.succ H) (∀. A)
 
   -- h(Aℓ) ≤ H for every field ℓ
   -- ─────────────────────────── H-Record
   -- h({ℓ:Aℓ}) ≤ H + 1
-  | record : (∀ ℓ A, (ℓ, A) ∈ R → HeightAtMost H A) → HeightAtMost (Nat.succ H) (.record R)
+  | record : (∀ ℓ A, (ℓ, A) ∈ R → HeightAtMost H A) → HeightAtMost (Nat.succ H) {R}
 
 def Valid (q H : Nat) (B : ImplicitType) : Prop := (q ⊢ⁱᵀ B) ∧ HeightAtMost H B
 
@@ -82,20 +82,20 @@ inductive DecodeSteps (ps : List Evidence) : Evidence → List Argument → Evid
   -- p · κ ⇝ r
   -- ───────────────────── D-Type
   -- p · ([B] :: κ) ⇝ r[B]
-  | type : DecodeSteps ps p κ r → DecodeSteps ps p (.type B :: κ) (.typeApp r B)
+  | type : DecodeSteps ps p κ r → DecodeSteps ps p (.type B :: κ) (r⟦B⟧)
 
   -- p · κ ⇝ r    ps[k] = u
   -- ───────────────────────── D-Instance
   -- p · (⟨k⟩ :: κ) ⇝ r⟨u⟩
   | instance :
-      DecodeSteps ps p κ r → Lookup ps k u → DecodeSteps ps p (.instance k :: κ) (.implicitApp r u)
+      DecodeSteps ps p κ r → Lookup ps k u → DecodeSteps ps p (.instance k :: κ) (r⟨u⟩)
 
 inductive DecodeSpine (ps : List Evidence) : Spine → Evidence → Prop where
 
   -- dⱼ · κ ⇝ p
   -- ────────────────── D-Spine
   -- (j, κ) ⇝ p
-  | intro : DecodeSteps ps (.ref j) κ p → DecodeSpine ps ⟨j, κ⟩ p
+  | intro : DecodeSteps ps $[j] κ p → DecodeSpine ps ⟨j, κ⟩ p
 
 inductive DecodeProgram : Program → List Evidence → Prop where
 
@@ -120,14 +120,14 @@ inductive StepConstraints (V : ImplicitType → Prop) (U : List ImplicitType) :
   -- ─────────────────────────────────── C-Type
   -- A · ([B] :: κ) : C[B/α] :: τ ⇒ C[B/α]
   | type :
-      StepConstraints V U A κ τ (.all C) → V B →
+      StepConstraints V U A κ τ (∀. C) → V B →
       StepConstraints V U A (.type B :: κ) (C.instantiate B :: τ) (C.instantiate B)
 
   -- A · κ : τ ⇒ B ⇒ C    U[k] = B
   -- ───────────────────────────────── C-Instance
   -- A · (⟨k⟩ :: κ) : C :: τ ⇒ C
   | instance :
-      StepConstraints V U A κ τ (.implicitArrow B C) → Lookup U k B →
+      StepConstraints V U A κ τ (B ⇒ C) → Lookup U k B →
       StepConstraints V U A (.instance k :: κ) (C :: τ) C
 
 inductive SpineConstraints (V : ImplicitType → Prop) (Δ U : List ImplicitType) :

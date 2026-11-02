@@ -1,4 +1,4 @@
-import Std
+import ImplicitSynthesis.Prelude
 
 /-!
 An abstract SMT boundary. Soundness is supplied with an oracle, not asserted
