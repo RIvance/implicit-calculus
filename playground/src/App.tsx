@@ -842,7 +842,7 @@ export function App({ initial, initialNotice }: { initial: DocumentState; initia
                       </div>
                       {result?.ok && (
                         <div className="callout">
-                          This program has no implicit goals. Its core term is available in Terms.
+                          This program has no implicit goals. Its resolved term is available in Terms.
                         </div>
                       )}
                       <Button variant="light" mt="lg" onClick={() => setGuideOpen(true)}>
@@ -871,12 +871,15 @@ export function App({ initial, initialNotice }: { initial: DocumentState; initia
                 <Tabs.Panel value="terms">
                   <div className="inspector term-inspector">
                     <Group justify="space-between">
-                      <h3>Core term</h3>
+                      <h3>Resolved term</h3>
                       <CopyButton text={result?.coreTerm ?? ''} />
                     </Group>
-                    <p className="muted small">Resolved evidence is explicit. Core binders use fresh display names.</p>
+                    <p className="muted small">
+                      All implicit goals have been replaced with their synthesized evidence.
+                    </p>
                     <pre className="math-block">
-                      {result?.coreTerm ?? 'The core term becomes available after all goals are resolved and checked.'}
+                      {result?.coreTerm ??
+                        'The resolved term becomes available after all goals are resolved and checked.'}
                     </pre>
                   </div>
                 </Tabs.Panel>

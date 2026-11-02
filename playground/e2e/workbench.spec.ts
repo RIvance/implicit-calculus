@@ -231,7 +231,7 @@ test('three columns keep compact goals, folding, and example selection connected
   await expect(page.locator('.goal-judgment')).toHaveText('Δ ⊢ ?δ₂ : {toString: A → String}');
   const text = await page.locator('.unresolved-code').innerText();
   expect(text).toMatch(/\n\s+toString =\n\s+λ/);
-  await page.getByRole('button', { name: 'Fold ToString1', exact: true }).click();
+  await page.getByRole('button', { name: 'Fold imp_ToString1', exact: true }).click();
   await expect(first).toHaveCount(0);
   await page.getByRole('combobox', { name: 'Select synthesis goal' }).click();
   await page.getByRole('option', { name: '?δ₁ : {toString: String → String}', exact: true }).click();

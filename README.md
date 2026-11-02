@@ -21,21 +21,15 @@ sbt 'runMain implicitlang.cli.Main examples/polymorphic.imp'
 
 The pinned dependencies are Scala 3.3.6, scala-parser-combinators 2.4.0, sbt 1.10.7,
 and the **official Z3 4.14.1 Java API and native libraries**.
-Tests use a small executable harness rather than an additional testing library.
 
-[The sbt dependency task](project/SmtDependency.scala) downloads an exact archive from
+[The sbt dependency task](project/SmtDependency.scala) downloads the archive from
 [Z3's official release](https://github.com/Z3Prover/z3/releases/tag/z3-4.14.1), verifies its
-committed SHA-256 checksum, and extracts the matching JAR and native libraries into
-`target/z3/`. Subsequent builds verify the archive and check the extracted files against it.
-A changed archive fails verification. No Z3 binaries are tracked in Git or installed into
-system or user directories. Library paths are set only for this project's forked JVMs;
-the parent shell and its configuration are untouched. `sbt clean` removes the local download.
+SHA-256 checksum, and extracts the JAR and native libraries into `target/z3/`.
+`sbt clean` removes the download.
 
-Pinned archives cover Linux x86-64 (glibc 2.35+) and ARM64 (glibc 2.34+), macOS x86-64
+Supported platforms are Linux x86-64 (glibc 2.35+) and ARM64 (glibc 2.34+), macOS x86-64
 and ARM64, and Windows x86-64 and x86. The host must supply the native C++ runtime.
-On Linux, sbt also locates an available C++ compiler's runtime for the child JVM's library
-path, allowing installations outside the system loader's default directories. An unsupported
-platform fails explicitly. The checksum pins the Z3 artifact; it does not pin the host OS or JDK.
+On Linux, sbt can locate that runtime through an installed C++ compiler.
 
 ## Browser playground
 

@@ -50,7 +50,7 @@ browser loads these assets from the same host as the site.
 - Read the formatted unresolved term in its own column and fold bindings to navigate longer programs.
   Goals retain explicit names; unnamed goals use δ subscripts. Hover for the expected type and result,
   or select a goal to expand its annotation and inspect its synthesis in the right column.
-- Inspect the core term, compile without evaluation, export the source or complete
+- Inspect the resolved term, compile without evaluation, export the source or complete
   report, and share source through a compressed URL fragment.
   The current draft is stored in this browser. Source edits mark existing results as stale.
 
@@ -61,7 +61,7 @@ size, and line wrapping. The research guide explains evidence construction and s
 
 Each search report is produced by the compiler. A satisfiable SMT model remains provisional
 until its used type arguments satisfy scope and height requirements. Accepted evidence is
-then checked by the resolver, and the resulting core term passes the independent core checker.
+then checked by the resolver, and the resolved term passes the independent core checker.
 The goal's **Checked** indicator records that validation; **Accepted model** records the
 earlier synthesis step. Model assignments can include unused argument slots.
 
@@ -103,8 +103,19 @@ de Bruijn indices. Core binders contain indices only; the workbench generates na
 
 ## Hosting
 
-Upload the contents of `dist/` to a static host such as GitHub Pages. The build uses relative
-asset paths, so it also works below a project path such as `/implicit-synthesis/`.
+Upload the contents of `dist/` to a static host. The build uses relative asset paths, so the same
+files work at a site's root or under a repository subdirectory.
+
+For automatic GitHub Pages publishing:
+
+1. Enable GitHub Actions in the repository's **Actions** tab if needed after forking.
+2. In **Settings → Pages → Build and deployment**, select **GitHub Actions** as the source.
+3. Push to the repository's default branch, or run the **Playground** workflow on that branch.
+
+The workflow tests and builds pull requests and default-branch pushes, including browser tests
+against the production site. Successful default-branch builds deploy to Pages; the deployment
+reports the published URL. The branch is read from repository settings, and the build's relative
+paths work with repository sites, account sites, and custom domains.
 
 To check the same files locally with Python's ordinary static server:
 
