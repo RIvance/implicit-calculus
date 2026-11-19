@@ -4,7 +4,7 @@ import { FileCode2, Search } from 'lucide-react';
 import { examples } from './examples';
 import type { DocumentState } from './document';
 
-export function Examples({ selected, onOpen }: { selected: string; onOpen: (document: DocumentState) => void }) {
+export function ExampleBrowser({ selected, onOpen }: { selected: string; onOpen: (document: DocumentState) => void }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'result' | 'error'>('all');
   const matches = examples.filter(

@@ -54,7 +54,7 @@ import { download, draftKey, shareDocument, type DocumentState } from './documen
 import { SourceEditor } from './SourceEditor';
 import { UnresolvedTerm } from './UnresolvedTerm';
 import { goalName } from './term-document';
-import { Examples } from './Examples';
+import { ExampleBrowser } from './ExampleBrowser';
 import { EvidenceGraph } from './EvidenceGraph';
 import { ConstraintExplorer, CopyButton, ModelExplorer, SearchTrace } from './Inspectors';
 import { ResearchGuide } from './ResearchGuide';
@@ -895,7 +895,7 @@ export function App({ initial, initialNotice }: { initial: DocumentState; initia
         </main>
       </div>
       <Modal opened={examplesOpen} onClose={() => setExamplesOpen(false)} title="Examples" size="lg" centered>
-        <Examples selected={document.name} onOpen={open} />
+        <ExampleBrowser selected={document.name} onOpen={open} />
       </Modal>
       <Drawer opened={guideOpen} onClose={() => setGuideOpen(false)} title="Research guide" position="right" size="lg">
         <ResearchGuide
